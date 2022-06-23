@@ -23,6 +23,9 @@ from util import (
     with_cache,
 )
 
+# 活动描述文件缓存时间
+DESC_JS_CACHE_SECONDS = 1 * 24 * 3600
+
 
 def newNotAmsActInfo(dtBeginTime: str, dtEndTime: str, sActivityName: str) -> AmsActInfo:
     info = AmsActInfo()
@@ -48,15 +51,15 @@ not_ams_activities = [
     newNotAmsActInfo(not_know_start_time__, not_know_end_time____, "黑钻礼包"),
     newNotAmsActInfo(not_know_start_time__, not_know_end_time____, "腾讯游戏信用礼包"),
     newNotAmsActInfo(not_know_start_time__, not_know_end_time____, "心悦app"),
-    newNotAmsActInfo("2022-01-20 00:00:00", "2022-02-20 23:59:59", "管家蚊子腿"),
+    newNotAmsActInfo("2022-01-20 00:00:00", "2022-02-28 23:59:59", "管家蚊子腿"),
     newNotAmsActInfo("2021-10-18 00:00:00", "2021-11-18 23:59:59", "qq视频蚊子腿"),
-    newNotAmsActInfo("2021-01-20 00:00:00", "2022-02-10 23:59:59", "qq视频蚊子腿-爱玩"),
+    newNotAmsActInfo("2022-06-23 00:00:00", "2022-07-22 23:59:59", "qq视频蚊子腿-爱玩"),
     newNotAmsActInfo("2021-03-31 00:00:00", not_know_end_time____, "会员关怀"),
-    newNotAmsActInfo("2021-01-20 00:00:00", "2022-02-28 23:59:59", "超级会员"),
-    newNotAmsActInfo("2021-01-20 00:00:00", "2022-02-28 23:59:59", "黄钻"),
-    newNotAmsActInfo("2021-01-19 00:00:00", "2022-02-20 23:59:59", "集卡"),
+    newNotAmsActInfo("2021-05-24 00:00:00", "2022-06-26 23:59:59", "超级会员"),
+    newNotAmsActInfo("2021-05-24 00:00:00", "2022-06-26 23:59:59", "黄钻"),
+    newNotAmsActInfo("2022-06-17 00:00:00", "2022-07-13 23:59:59", "集卡"),
     newNotAmsActInfo(month_start_day______, month_end_day________, "DNF助手编年史"),
-    newNotAmsActInfo("2022-01-20 00:00:00", "2022-03-02 23:59:59", "colg每日签到"),
+    newNotAmsActInfo("2022-06-16 00:00:00", "2022-07-31 23:59:59", "colg每日签到"),
     newNotAmsActInfo(not_know_start_time__, not_know_end_time____, "小酱油周礼包和生日礼包"),
     newNotAmsActInfo("2021-09-19 00:00:00", "2021-10-05 23:59:59", "qq会员杯"),
     newNotAmsActInfo("2021-09-11 00:00:00", "2021-10-13 23:59:59", "虎牙"),
@@ -79,43 +82,50 @@ act_name_to_url = {
     # 短期付费活动
     #
     "DNF助手编年史": "dnf助手左侧栏",
-    "DNF漫画预约活动": "https://dnf.qq.com/lbact/a20210617comic/",
-    "hello语音（皮皮蟹）网页礼包兑换": "https://dnf.qq.com/cp/a20210806dnf/",
-    "DNF福利中心兑换": "https://dnf.qq.com/cp/a20190312welfare/index.htm",
-    "dnf助手活动": "https://mwegame.qq.com/act/dnf/a20211209plants/indexpc.html",
-    "DNF心悦": "https://xinyue.qq.com/act/a20211209xinchun/share.html",
-    "会员关怀": "https://act.qzone.qq.com/v2/vip/tx/p/7477_6c7b7f17",
-    "集卡": "https://act.qzone.qq.com/v2/vip/tx/p/20545_145ba002",
-    "qq视频蚊子腿-爱玩": "https://magic.iwan.qq.com/magic-act/iuc6hayzjxw2it907a4q7yerkg/index_page1.html",
-    "dnf助手活动Dup": "https://mwegame.qq.com/act/dnf/a20211216newyear/indexpc.html",
-    "DNF集合站": "https://dnf.qq.com/lbact/a20220121gather/",
-    "WeGame活动": "https://dnf.qq.com/lbact/a20220119wegame/index.html",
-    "管家蚊子腿": "https://sdi.3g.qq.com/v/2022011118372511947",
-    "超级会员": "https://act.qzone.qq.com/v2/vip/tx/p/20687_41fbdb6b",
-    "黄钻": "https://act.qzone.qq.com/v2/vip/tx/p/20683_605cb50c",
-    "DNF马杰洛的规划": "https://dnf.qq.com/cp/a20220120care/index.html",
-    "组队拜年": "https://dnf.qq.com/cp/a20211221BN/index.html",
-    "DNF落地页活动": "https://dnf.qq.com/cp/a20220120index/index.html",
+    "DNF格斗大赛": "https://dnf.qq.com/cp/a20220402pk/index.htm",
+    "冒险的起点": "https://dnf.qq.com/lbact/a20220519lbts01j/indexm.html",
+    "DNF心悦": "https://xinyue.qq.com/act/a20220527dnfz/index.html",
+    "DNF互动站": "https://dnf.qq.com/cp/a20220609fete/index.html",
+    "DNF闪光杯": "https://xinyue.qq.com/act/a20220517xyFlashMatchActPC/index.html",
+    "DNF落地页活动": "https://dnf.qq.com/cp/a20220616index/",
+    "勇士的冒险补给": "https://mwegame.qq.com/act/dnf/a20220525dnfmxbj/index.html",
+    "colg每日签到": "https://bbs.colg.cn/forum-171-1.html",
+    "DNF周年庆登录活动": "https://dnf.qq.com/cp/a20220616gift/",
+    "DNF马杰洛的规划": "https://dnf.qq.com/cp/a20220617challenge/index.html",
+    "超级会员": "https://act.qzone.qq.com/v2/vip/tx/p/41780_d2fc9a48",
+    "黄钻": "https://act.qzone.qq.com/v2/vip/tx/p/41784_f68ffe5f",
+    "我的小屋": "https://dnf.qq.com/cp/a20220616home/index.html",
+    "DNF集合站": "https://dnf.qq.com/lbact/a20220616jhy/index.html",
+    "WeGame活动": "https://dnf.qq.com/lbact/a20220616wegame/index.html",
+    "集卡": "https://act.qzone.qq.com/v2/vip/tx/p/42163_27b8ff61",
+    "KOL": "https://dnf.qq.com/cp/a20220526kol/index.html",
+    "qq视频蚊子腿-爱玩": "https://magic.iwan.qq.com/magic-act/t8etxryix0lzux9za01l1cdssg/index_index.html",
     #
     # 已过期活动
     #
+    "DNF共创投票": "https://dnf.qq.com/cp/a20210914design/list-end.html",
+    "dnf助手活动Dup": "https://mwegame.qq.com/act/dnf/a20220105headerm/index.html",
+    "DNF漫画预约活动": "https://dnf.qq.com/lbact/a20210617comic/",
+    "dnf助手活动": "https://mwegame.qq.com/act/dnf/a20220407present/index.html",
+    "翻牌活动": "https://dnf.qq.com/cp/a20220420cardflip/index.html",
+    "hello语音（皮皮蟹）网页礼包兑换": "https://dnf.qq.com/cp/a20210806dnf/",
+    "管家蚊子腿": "https://sdi.3g.qq.com/v/2022011118372511947",
+    "DNF福利中心兑换": "https://dnf.qq.com/cp/a20190312welfare/index.htm",
+    "魔界人探险记": "https://dnf.qq.com/cp/a20220121random/index.html",
+    "会员关怀": "https://act.qzone.qq.com/v2/vip/tx/p/7477_6c7b7f17",
+    "组队拜年": "https://dnf.qq.com/cp/a20211221BN/index.html",
     "新职业预约活动": "https://dnf.qq.com/cp/a20211130reserve/index.html",
     "DNF集合站_史诗之路": "https://dnf.qq.com/lbact/a20211028jhye/index.html",
     "WeGame活动_新版": "https://act.wegame.com.cn/wand/danji/a20211201DNFCarnival/",
     "DNF娱乐赛": "https://dnf.qq.com/cp/a20211219dnfyulesai/index.html",
     "DNF公会活动": "https://dnf.qq.com/cp/a20211028GH/index.html",
-    "DNF闪光杯": "https://xinyue.qq.com/act/a20211022sgb/pc/index.html",
     "关怀活动": "https://dnf.qq.com/lbact/a20211118care/index.html",
     "DNF记忆": "https://dnf.qq.com/cp/a20211203dnfmem/index.html",
     "DNF预约": "https://dnf.qq.com/cp/a20211115dnf/",
     "DNF名人堂": "https://dnf.qq.com/cp/hof20211123/index.html",
-    "DNF共创投票": "http://dnf.qq.com/cp/a20210922create/page.html",
     "qq视频蚊子腿": "https://m.film.qq.com/magic-act/yauhs87ql00t63xttwkas8papl/index_index.html",
-    "KOL": "https://dnf.qq.com/lbact/a20211014kol2/index.html",
     "WeGameDup": "https://dnf.qq.com/lbact/a20211014wg/index.html",
-    "勇士的冒险补给": "https://dnf.qq.com/lbact/a20210622lb0wcuh/index.html",
     "轻松之路": "https://dnf.qq.com/cp/a20210914qszlm/index.html",
-    "colg每日签到": "https://bbs.colg.cn/forum-171-1.html",
     "命运的抉择挑战赛": "https://dnf.qq.com/cp/a20210826fate/index.html",
     "虎牙": "https://www.huya.com/367967",
     "wegame国庆活动【秋风送爽关怀常伴】": "https://dnf.qq.com/lbact/a20200922wegame/index.html",
@@ -134,8 +144,6 @@ act_name_to_url = {
     "DNF强者之路": "https://dnf.qq.com/cp/a20210312Strong/index.html",
     "管家蚊子腿-旧版": "https://guanjia.qq.com/act/cop/20210425dnf/pc/",
     "DNF十三周年庆活动": "https://dnf.qq.com/cp/a20210524fete/index.html",
-    "DNF周年庆登录活动": "https://dnf.qq.com/cp/a20210618anniversary/index.html",
-    "DNF格斗大赛": "https://dnf.qq.com/cp/a20210405pk/",
     "DNF奥兹玛竞速": "https://xinyue.qq.com/act/a20210526znqhd/index.html",
     "我的dnf13周年活动": "https://dnf.qq.com/cp/a20210604history/index.html",
     "qq视频-AME活动": "https://dnf.qq.com/cp/a20210816video/",
@@ -216,12 +224,12 @@ class Urls:
         self.iActivityId_xinyue_sailiyam = "339263"  # DNF进击吧赛利亚
         self.iActivityId_wegame_guoqing = "331515"  # wegame国庆活动【秋风送爽关怀常伴】
         self.iActivityId_dnf_1224 = "353266"  # DNF-1224渠道活动合集
-        self.iActivityId_dnf_shanguang = "419708"  # DNF闪光杯
+        self.iActivityId_dnf_shanguang = "474091"  # DNF闪光杯
         self.iActivityId_dnf_female_mage_awaken = "336524"  # 10月女法师三觉活动
         self.iActivityId_dnf_rank = "347456"  # DNF-2020年KOL榜单建设送黑钻
         self.iActivityId_dnf_carnival = "346329"  # DNF嘉年华页面主页面签到-pc
         self.iActivityId_dnf_carnival_live = "346830"  # DNF嘉年华直播页面-PC
-        self.iActivityId_dnf_dianzan = "419223"  # DNF2020共创投票领礼包需求
+        self.iActivityId_dnf_dianzan = "472877"  # DNF2020共创投票领礼包需求
         self.iActivityId_dnf_welfare = "215651"  # DNF福利中心兑换
         self.iActivityId_dnf_welfare_login_gifts = "441426"  # DNF福利中心-登陆游戏领福利
         self.iActivityId_xinyue_financing = "126962"  # 心悦app理财礼卡
@@ -229,33 +237,33 @@ class Urls:
         self.iActivityId_xinyue_weekly_gift = "155525"  # 心悦app周礼包
         self.iActivityId_dnf_drift = "348890"  # dnf漂流瓶
         self.iActivityId_majieluo = "425557"  # DNF马杰洛的规划
-        self.iActivityId_dnf_helper = "434331"  # DNF助手活动
-        self.iActivityId_dnf_helper_dup = "438820"  # DNF助手活动
+        self.iActivityId_dnf_helper = "461270"  # DNF助手活动
+        self.iActivityId_dnf_helper_dup = "451819"  # DNF助手活动
         self.iActivityId_warm_winter = "347445"  # 暖冬有礼
         self.iActivityId_qq_video_amesvr = "398546"  # qq视频-AME活动
         self.iActivityId_dnf_bbs_v1 = "431448"  # DNF论坛积分兑换活动
         self.iActivityId_dnf_bbs_v2 = "397645"  # DNF论坛积分兑换活动
-        self.iActivityId_dnf_luodiye = "441440"  # DNF落地页活动需求
-        self.iActivityId_dnf_wegame = "442952"  # WeGame活动
+        self.iActivityId_dnf_luodiye = "473946"  # DNF落地页活动需求
+        self.iActivityId_dnf_wegame = "477739"  # WeGame活动
         self.iActivityId_dnf_wegame_dup = "415808"  # WeGame活动
         self.iActivityId_spring_fudai = "354771"  # 新春福袋大作战
         self.iActivityId_dnf_fuqian = "362403"  # DNF福签大作战
-        self.iActivityId_dnf_collection = "443735"  # DNF集合站
+        self.iActivityId_dnf_collection = "478078"  # DNF集合站
         self.iActivityId_dnf_collection_dup = "423011"  # DNF集合站
         self.iActivityId_firecrackers = "355187"  # 燃放爆竹活动
         self.iActivityId_dnf_ozma = "382419"  # DNF奥兹玛竞速
         self.iActivityId_hello_voice = "438826"  # hello语音（皮皮蟹）奖励兑换
-        self.iActivityId_dnf_pk = "370758"  # DNF格斗大赛
-        self.iActivityId_dnf_xinyue = "433531"  # DNF心悦
+        self.iActivityId_dnf_pk = "463319"  # DNF格斗大赛
+        self.iActivityId_dnf_xinyue = "473842"  # DNF心悦
         self.iActivityId_dnf_strong = "366330"  # DNF强者之路
         self.iActivityId_dnf_comic = "386057"  # DNF&腾讯动漫周年庆合作活动
         self.iActivityId_dnf_13 = "381033"  # DNF十三周年庆双端站点
         self.iActivityId_dnf_my_story = "382161"  # 我的dnf13周年活动
         self.iActivityId_dnf_reserve = "430779"  # 新职业预约活动
-        self.iActivityId_dnf_anniversary = "382072"  # DNF周年庆登录活动
-        self.iActivityId_dnf_kol = "416057"  # DNF KOL
-        self.iActivityId_maoxian = "407067"  # 勇士的冒险补给
-        self.iActivityId_maoxian_dup = "405979"  # 勇士的冒险补给-回归玩家
+        self.iActivityId_dnf_anniversary = "474801"  # DNF周年庆登录活动
+        self.iActivityId_dnf_kol = "472448"  # DNF KOL
+        self.iActivityId_maoxian_start = "473752"  # 冒险的起点
+        self.iActivityId_maoxian = "476723"  # 勇士的冒险补给
         self.iActivityId_dnf_gonghui = "421277"  # DNF公会活动
         self.iActivityId_dnf_mingyun_jueze = "405654"  # 命运的抉择挑战赛
         self.iActivityId_dnf_guanhuai = "421327"  # 关怀活动
@@ -265,6 +273,8 @@ class Urls:
         self.iActivityId_dnf_memory = "431712"  # DNF记忆
         self.iActivityId_dnf_game = "427765"  # DNF娱乐赛
         self.iActivityId_team_happy_new_year = "438251"  # 组队拜年
+        self.iActivityId_dnf_card_flip = "458381"  # 翻牌活动
+        self.iActivityId_dnf_interactive = "469840"  # DNF互动站
 
         # amesvr通用活动系统配置
         # 需要手动额外传入参数：sMiloTag, sServiceDepartment, sServiceType
@@ -284,6 +294,8 @@ class Urls:
             "&prize={prize}&qd={qd}&iReceiveUin={iReceiveUin}&map1={map1}&map2={map2}&len={len}&itemIndex={itemIndex}&sRole={sRole}&loginNum={loginNum}&level={level}&inviteUin={inviteUin}"
             "&iGuestUin={iGuestUin}&ukey={ukey}&iGiftID={iGiftID}&iInviter={iInviter}&iPageNow={iPageNow}&iPageSize={iPageSize}&iType={iType}&iWork={iWork}&iPage={iPage}&sNick={sNick}"
             "&iMatchId={iMatchId}&iGameId={iGameId}&iIPId={iIPId}&iVoteId={iVoteId}&iResult={iResult}&personAct={personAct}&teamAct={teamAct}&param={param}&dhnums={dhnums}&sUin={sUin}&pointID={pointID}"
+            "&workId={workId}&isSort={isSort}&jobName={jobName}&title={title}&actSign={actSign}&iNum={iNum}&prefer={prefer}&card={card}&answer1={answer1}&answer2={answer2}&answer3={answer3}"
+            "&countsInfo={countsInfo}&power={power}"
         )
 
         # ide通用活动
@@ -292,15 +304,16 @@ class Urls:
         #
         # note: 在活动页面 网络请求 过滤 ide/page/ 即可定位到活动id
         self.ide_iActivityId_dnf_social_relation_permission = "14_uK7KKe"  # DNF关系链接-用户授权接口
-        self.ide_iActivityId_majieluo = "93_6YpT4D"  # DNF马杰洛的规划
+        self.ide_iActivityId_majieluo = "22_FdBGxj"  # DNF马杰洛的规划
         self.ide_iActivityId_mojieren = "86_OLju2H"  # 魔界人探险记
+        self.ide_iActivityId_dnf_my_home = "49_Un4iJS"  # 我的小屋
 
         self.ide = "https://{ide_host}/ide/"
         self.ide_raw_data = (
             "iChartId={iChartId}&iSubChartId={iSubChartId}&sIdeToken={sIdeToken}"
             "&sRoleId={sRoleId}&sRoleName={sRoleName}&sArea={sArea}&sMd5str={sMd5str}&sCheckparam={sCheckparam}&roleJob={roleJob}&sAreaName={sAreaName}"
-            "&sAuthInfo={sAuthInfo}&sActivityInfo={sActivityInfo}&openid={openid}&sCode={sCode}"
-            "&e_code=0&g_code=0&eas_url={eas_url}&eas_refer={eas_refer}"
+            "&sAuthInfo={sAuthInfo}&sActivityInfo={sActivityInfo}&openid={openid}&sCode={sCode}&startPos={startPos}"
+            "&e_code=0&g_code=0&eas_url={eas_url}&eas_refer={eas_refer}&iType={iType}"
         )
 
         # DNF共创投票
@@ -340,7 +353,7 @@ class Urls:
             "https://club.vip.qq.com/qqvip/api/trpc/xcard/RequestItems?token={token}&t={rand}&g_tk={g_tk}"
         )
         # 本地假设的集卡活动id，每次新版的集卡更新时，就增加一下这个（如果继续出旧版的那种集卡活动，则不需要修改这个）
-        self.pesudo_ark_lottery_act_id = 10004
+        self.pesudo_ark_lottery_act_id = 10006
 
         self.qzone_activity_club_vip = (
             "https://club.vip.qq.com/qqvip/api/tianxuan/access/execAct?g_tk={g_tk}&isomorphism-args={isomorphism_args}"
@@ -376,9 +389,12 @@ class Urls:
 
         # dnf助手编年史活动
         # wang.xinyue相关接口，额外参数：api: 具体api名称，userId（助手userId），sPartition/sRoleId, isLock->isLock, amsid->sLbCode, iLbSel1->iLbSel1, 区分自己还是队友的基础奖励, num: 1, mold: 1-自己，2-队友,  exNum->1, iCard->iCard, iNum->iNum
-        self.dnf_helper_chronicle_wang_xinyue = "https://wang.xinyue.qq.com/peak/{api}?userId={userId}&gameId=1006&sPartition={sPartition}&sRoleId={sRoleId}&game_code=dnf&token={token}&uin={uin}&uniqueRoleId={uniqueRoleId}&isLock={isLock}&amsid={amsid}&iLbSel1={iLbSel1}&num={num}&mold={mold}&exNum={exNum}&iCard={iCard}&iNum={iNum}&appidTask=1000042"
+        self.dnf_helper_chronicle_wang_xinyue = "https://wang.xinyue.qq.com/peak/{api}?userId={userId}&gameId=1006&sPartition={sPartition}&sRoleId={sRoleId}&game_code=dnf&token={token}&uin={uin}&toUin={toUin}&uniqueRoleId={uniqueRoleId}&isLock={isLock}&amsid={amsid}&iLbSel1={iLbSel1}&num={num}&mold={mold}&exNum={exNum}&iCard={iCard}&iNum={iNum}&appidTask=1000042&&date={date}"
         # mwegame相关接口，额外参数：api: 具体api名称，userId（助手userId），sPartition/sRoleId, actionId: 自己的任务为任务信息中的各个任务的mActionId，队友的任务对应的是各个任务的pActionId
         self.dnf_helper_chronicle_mwegame = "https://mwegame.qq.com/act/GradeExp/ajax/{api}?userId={userId}&gameId=1006&sPartition={sPartition}&sRoleId={sRoleId}&game_code=dnf&actionId={actionId}&pUserId={pUserId}&isBind={isBind}"
+
+        # 编年史新版接口
+        self.dnf_helper_chronicle_yoyo = "https://mwegame.qq.com/yoyo/dnf/{api}"
 
         # 助手活动相关接口
         self.dnf_helper = "https://mwegame.qq.com/act/dnf/destiny/{api}?gameId=10014&roleSwitch=1&toOpenid=&roleId={roleId}&uniqueRoleId={uniqueRoleId}&openid=&serverName={serverName}&toUin={toUin}&cGameId=1006&userId={userId}&serverId={serverId}&token={token}&isMainRole=0&subGameId=10014&areaId={areaId}&gameName=DNF&areaName={areaName}&roleJob={roleJob}&nickname={nickname}&roleName={roleName}&uin={uin}&roleLevel={roleLevel}&"
@@ -390,6 +406,7 @@ class Urls:
         self.dnf_bbs_signin = (
             "https://dnf.gamebbs.qq.com/plugin.php?id=k_misign:sign&operation=qiandao&formhash={formhash}&format=empty"
         )
+        self.dnf_bbs_home = "https://dnf.gamebbs.qq.com/home.php?mod=spacecp&ac=credit"
 
         # 心悦app
         # 心悦猫咪api
@@ -520,12 +537,10 @@ def search_act(actId) -> Optional[AmsActInfo]:
 def get_act_desc_js(actId):
     actId = str(actId)
 
-    a_week_seconds = 7 * 24 * 3600
-
     act_cache_file = with_cache(
         "act_desc",
         actId,
-        cache_max_seconds=a_week_seconds,
+        cache_max_seconds=DESC_JS_CACHE_SECONDS,
         cache_miss_func=lambda: download_act_desc_js(actId),
         cache_validate_func=lambda filepath: os.path.isfile(filepath),
     )
@@ -578,12 +593,10 @@ def search_ide_act(actId: str) -> Optional[IdeActInfo]:
 def get_ide_act_desc_json(actId) -> str:
     actId = str(actId)
 
-    a_week_seconds = 7 * 24 * 3600
-
     act_cache_file = with_cache(
         "ide_act_desc",
         actId,
-        cache_max_seconds=a_week_seconds,
+        cache_max_seconds=DESC_JS_CACHE_SECONDS,
         cache_miss_func=lambda: download_ide_act_desc_json(actId),
         cache_validate_func=lambda filepath: os.path.isfile(filepath),
     )

@@ -24,6 +24,8 @@ enable_multiprocessing = true
 enable_super_fast_mode = true
 # 进程池大小，若为0，则默认为当前cpu核心数，若为-1，则默认为当前账号数
 multiprocessing_pool_size = -1
+# 是否启用多进程登录功能，如果分不清哪个号在登录，请关闭该选项
+enable_multiprocessing_login = true
 
 # 是否启用自动更新功能
 auto_update_on_start = true
@@ -42,6 +44,9 @@ notify_pay_expired_in_days = 7
 
 # 马杰洛新春版本赠送卡片目标QQ
 majieluo_send_card_target_qq = ""
+
+# 心悦集卡赠送卡片目标QQ
+xinyue_send_card_target_qq = ""
 
 # 是否在活动最后一天消耗所有卡牌来抽奖（若还有卡）
 cost_all_cards_and_do_lottery_on_last_day = false
@@ -138,7 +143,7 @@ name = "默认账号名-1"
 login_mode = "qr_login"
 
 # 是否无法在道聚城绑定dnf，比如被封禁或者是朋友的QQ（主要用于小号，被风控不能注册dnf账号，但是不影响用来当抽卡等活动的工具人）
-cannot_bind_dnf = false
+cannot_bind_dnf_v2 = false
 
 # 漂流瓶每日邀请列表，最多可填8个（不会实际发消息）
 drift_send_qq_list = []
@@ -163,27 +168,10 @@ gonghui_rolename_huizhang = ""
 # 公会活动-会员角色名称，如果不设置，则尝试符合条件的角色（优先当前角色）
 gonghui_rolename_huiyuan = ""
 
-# 以下dnf论坛相关的配置会配置就配置，不会就不要配置，我不会回答关于这俩如何获取的问题。
-# 获取方式
-#   1. 访问 签到页面 https://dnf.gamebbs.qq.com/plugin.php?id=k_misign:sign
-#   2. 按f12打开开发者工具，点击NetWork tab，然后勾选第二行的Preserve log（保留日志）
-#   3. 先登录账号，然后点击右上角头像退出登录
-#   4. 在左上角筛选项中输入 action=logout&formhash=
-#   5. 在筛选出的请求中，从请求参数中找到formhash的值，将其填到下面（如果不知道到哪里位置是formhash的值，就百度 http get请求参数格式，别来问我）
-#   6. 在该请求的详情中，在Headers Tab -> Request Headers -> cookie 找到请求头信息中的cookie，将其值整个复制过来，填到下面的双引号里面（这一步不知道怎么操作，就百度：chrome开发者工具 如何查看网络请求的完整cookie，别来问我）
-#
-# dnf论坛签到formhash
-dnf_bbs_formhash = ""
-# dnf论坛cookie
+# dnf论坛cookie，具体获取方式请看【使用教程/使用文档.docx/其他功能/DNF官方论坛Cookie获取方式】
 dnf_bbs_cookie = ""
 
-# colg cookie
-# 获取方式：
-#   1. 访问 colg https://bbs.colg.cn/forum-171-1.html
-#   2. 按f12打开开发者工具
-#   3. 按f5刷新一遍网页
-#   4. 在左上角筛选项中输入 plugin.php
-#   5. 选择筛选出的任意一个请求，在Headers Tab -> Request Headers -> cookie 找到请求头信息中的cookie，将其值整个复制过来，填到下面的双引号里面（这一步不知道怎么操作，就百度：chrome开发者工具 如何查看网络请求的完整cookie，别来问我）
+# colg cookie，具体获取方式请看【使用教程/使用文档.docx/其他功能/colg论坛Cookie获取方式】
 colg_cookie = ""
 
 # 获取方式 与colg的流程基本一致，除了网页调整为虎牙的页面（需要先登录）
@@ -246,7 +234,7 @@ count = 2
 # 是否禁用各种活动，供小号使用，这样新增的各种活动都将被禁用
 # 例外情况：道聚城、许愿、心悦特权专区、集卡这四个活动不受该配置项影响
 # 如果想要单独设置各个活动的开关，请不要设置这个配置项，否则各个新活动都会被禁用
-disable_most_activities = false
+disable_most_activities_v2 = false
 
 # 是否禁用分享功能
 disable_share = false
@@ -340,6 +328,8 @@ get_dnf_reserve = true
 get_dnf_anniversary = true
 # 是否领取 KOL 活动
 get_dnf_kol = true
+# 是否领取 冒险的起点 活动
+get_maoxian_start = true
 # 是否领取 勇士的冒险补给 活动
 get_maoxian = true
 # 是否领取 小酱油周礼包和生日礼包 活动
@@ -506,7 +496,7 @@ get_guanjia = true
 #
 #[[account_configs.xinyue_operations]]
 #iFlowId = "747684"
-#sFlowName = "抗疲劳秘药30点（95lv以上，1天1次）(日限3)(需50成就点)"
+#sFlowName = "抗疲劳秘药30点（95lv以上，1天1次）(日限3)(需30成就点)"
 #count = 1
 #
 #[[account_configs.xinyue_operations]]
@@ -665,6 +655,10 @@ need_take_awards = false
 10003 = false
 # 2022.01.19 新春新气象 虎啸阿拉德 新春集雪人卡片，追忆天空欢乐送！
 10004 = false
+# 2022.04.21 精灵传说 耕耘来袭
+10005 = false
+# 2022.06.17 破界新生 满级突破
+10006 = false
 
 # 会员关怀相关配置
 [account_configs.vip_mentor]

@@ -9,6 +9,7 @@ import os
 import pathlib
 import platform
 import random
+import re
 import shutil
 import signal
 import socket
@@ -19,7 +20,8 @@ import time
 import traceback
 import uuid
 import webbrowser
-from functools import wraps
+from functools import lru_cache, wraps
+from multiprocessing import cpu_count
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 from urllib import parse
 from urllib.parse import quote_plus
@@ -31,14 +33,70 @@ import toml
 import urllib3.exceptions
 
 from compress import compress_in_memory_with_lzma, decompress_in_memory_with_lzma
-from const import cached_dir
+from const import cached_dir, db_top_dir
 from db import CacheDB, CacheInfo
+from exceptions_def import SameAccountTryLoginAtMultipleThreadsException
 from log import asciiReset, color, get_log_func, logger
 from version import now_version, ver_time
 
 
 def is_windows() -> bool:
     return platform.system() == "Windows"
+
+
+def check_some_exception(e: Exception, show_last_process_result=True) -> str:
+    msg = ""
+
+    def format_msg(msg, _color="bold_yellow"):
+        return "\n" + color(_color) + msg + asciiReset
+
+    # 特判一些错误
+    if type(e) is KeyError and e.args[0] == "modRet":
+        msg += format_msg(
+            "大概率是这个活动过期了，或者放鸽子到点了还没开放，若影响正常运行流程，可先自行关闭这个活动开关(若config.toml中没有，请去config.example.toml找到对应开关名称)，或等待新版本（日常加班，有时候可能会很久才发布新版本）"
+        )
+    elif type(e) in [
+        socket.timeout,
+        urllib3.exceptions.ConnectTimeoutError,
+        urllib3.exceptions.MaxRetryError,
+        urllib3.exceptions.ReadTimeoutError,
+        requests.exceptions.ConnectTimeout,
+        requests.exceptions.ReadTimeout,
+    ]:
+        msg += format_msg("网络超时了，一般情况下是因为网络问题，也有可能是因为对应网页的服务器不太行，多试几次就好了<_<（不用管，会自动重试的）")
+    elif type(e) in [
+        PermissionError,
+    ]:
+        msg += format_msg(
+            "权限错误一般是以下原因造成的\n"
+            "1. 该文件被占用，比如打开了多个小助手实例或者其他应用占用了这些文件，可以尝试重启电脑后再运行\n"
+            "2. 开启了VPN，请尝试关闭VPN后再运行（看上去毫不相关，但确实会这样- -）"
+        )
+    elif type(e) is OSError:
+        # OSError: [WinError 1455] 页面文件太小，无法完成操作。
+        if e.winerror == 1455:
+            msg += format_msg(f"当前电脑内存不足，请调小多进程相关配置。可将【配置工具/公共配置/多进程】调整为当前cpu的一半（{cpu_count() / 2}），或者其他合适的数值，或者关闭。")
+    elif type(e) is FileNotFoundError:
+        # FileNotFoundError: [Errno 2] No such file or directory: 'config.toml'
+        msg += format_msg(f"文件 {e.filename} 不见了，很有可能是被杀毒软件删除了，请重新解压一份小助手来使用，同时最好将小助手所在文件夹添加到杀毒软件的白名单中")
+    elif type(e) in [
+        selenium.common.exceptions.TimeoutException,
+    ]:
+        msg += format_msg("浏览器等待对应元素超时了，很常见的。如果一直超时导致无法正常运行，可去config.example.toml将登录超时相关配置加到config.toml中，并调大超时时间")
+    elif type(e) in [
+        SameAccountTryLoginAtMultipleThreadsException,
+    ]:
+        msg += format_msg("请关闭当前窗口，然后在配置工具中点击【清除登录状态】按钮后再次运行~")
+
+    if show_last_process_result:
+        from network import last_response_info
+
+        if last_response_info is not None:
+            lr = last_response_info
+            text = parse_unicode_escape_string(lr.text)
+            msg += format_msg(f"最近一次收到的请求结果为：status_code={lr.status_code} reason={lr.reason} \n{text}", "bold_cyan")
+
+    return msg
 
 
 if is_windows():
@@ -51,14 +109,6 @@ if is_windows():
     MB_ICONINFORMATION = win32con.MB_ICONINFORMATION
 else:
     MB_ICONINFORMATION = 64
-
-
-def uin2qq(uin):
-    return str(uin)[1:].lstrip("0")
-
-
-def is_valid_qq(qq: str) -> bool:
-    return qq.isnumeric()
 
 
 def change_console_window_mode_async(disable_min_console=False):
@@ -153,10 +203,6 @@ def try_set_console_window_mode(show_mode: int, mode_name: str, mode_enabled: bo
     win32gui.ShowWindow(current_hwnd, show_mode)
 
 
-def exists_flag_file(flag_file_name: str) -> bool:
-    return os.path.exists(flag_file_name)
-
-
 def get_parents(child):
     parents = [child]
 
@@ -171,6 +217,196 @@ def get_parents(child):
         pass
 
     return parents
+
+
+def async_message_box(
+    msg: str,
+    title: str,
+    print_log=True,
+    icon=MB_ICONINFORMATION,
+    open_url="",
+    show_once=False,
+    follow_flag_file=True,
+    color_name="bold_cyan",
+    open_image="",
+    show_once_daily=False,
+):
+    async_call(
+        message_box,
+        msg,
+        title,
+        print_log,
+        icon,
+        open_url,
+        show_once,
+        follow_flag_file,
+        color_name,
+        open_image,
+        show_once_daily,
+        call_from_async=True,
+    )
+
+
+def message_box(
+    msg: str,
+    title: str,
+    print_log=True,
+    icon=MB_ICONINFORMATION,
+    open_url="",
+    show_once=False,
+    follow_flag_file=True,
+    color_name="bold_cyan",
+    open_image="",
+    show_once_daily=False,
+    use_qt_messagebox=False,
+    call_from_async=False,
+):
+    get_log_func(logger.warning, print_log)(color(color_name) + msg.replace("\n\n", "\n"))
+
+    if is_run_in_github_action():
+        return
+
+    from first_run import is_daily_first_run, is_first_run
+
+    show_message_box = True
+    if show_once and not is_first_run(f"message_box_{title}"):
+        show_message_box = False
+    if show_once_daily and not is_daily_first_run(f"daily_message_box_{title}"):
+        show_message_box = False
+    if follow_flag_file and exists_flag_file(".no_message_box"):
+        show_message_box = False
+
+    if show_message_box and is_windows():
+        if use_qt_messagebox and not call_from_async:
+            from PyQt5.QtWidgets import QApplication
+
+            from qt_wrapper import show_message
+
+            # 初始化qt，方便使用qt的弹窗
+            qt_message_box_container = QApplication([])
+
+            show_message(title, msg, is_text_selectable=True, show_log=False)
+
+            # 清理
+            qt_message_box_container.quit()
+        else:
+            win32api.MessageBox(0, msg, title, icon)
+
+        if open_url != "":
+            webbrowser.open(open_url)
+
+        if open_image != "":
+            os.popen(os.path.realpath(open_image))
+
+
+def get_screen_size() -> Tuple[int, int]:
+    """
+    :return: 屏幕宽度和高度
+    """
+    if not is_windows():
+        return 1920, 1080
+
+    width, height = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
+    return width, height
+
+
+def get_resolution() -> str:
+    width, height = get_screen_size()
+    return f"{width}x{height}"
+
+
+def show_unexpected_exception_message(e: Exception):
+    from config import Config, config
+
+    time_since_release = get_now() - parse_time(ver_time, "%Y.%m.%d")
+    cfg = Config()
+    try:
+        cfg = config()
+    except Exception:
+        pass
+    msg = (
+        f"ver {now_version} (发布于{ver_time}，距今已有{time_since_release.days}天啦) 运行过程中出现未捕获的异常，请加群{cfg.common.qq_group}反馈或自行解决。"
+        + check_some_exception(e)
+    )
+    logger.exception(color("fg_bold_yellow") + msg, exc_info=e)
+    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
+    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
+    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
+    logger.warning(color("fg_bold_green") + "如果要反馈，请把整个窗口都截图下来- -不要只截一部分")
+    logger.warning(color("fg_bold_yellow") + "不要自动无视上面这三句话哦，写出来是让你看的呀<_<不知道出啥问题的时候就按提示去看看是否有新版本哇，而不是不管三七二十一就来群里问嗷")
+    logger.warning(color("fg_bold_cyan") + f"链接：{cfg.common.netdisk_link}")
+
+    if run_from_src():
+        show_head_line(
+            "目前使用的是源码版本，出现任何问题请自行调试或google解决，这是使用源码版本的前提。另外，在出问题时，建议先尝试更新依赖库，确保与依赖配置中的版本匹配。", color("bold_yellow")
+        )
+
+
+def disable_quick_edit_mode():
+    if not is_windows():
+        return
+
+    # https://docs.microsoft.com/en-us/windows/console/setconsolemode
+    def _cb():
+        ENABLE_EXTENDED_FLAGS = 0x0080
+
+        logger.info(color("bold_green") + "将禁用命令行的快速编辑模式，避免鼠标误触时程序暂停，若需启用，请去配置文件取消禁用快速编辑模式~")
+        show_quick_edit_mode_tip()
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleMode(kernel32.GetStdHandle(win32api.STD_INPUT_HANDLE), ENABLE_EXTENDED_FLAGS)
+
+    async_call(_cb)
+
+
+def show_quick_edit_mode_tip():
+    logger.info(
+        color("bold_blue") + "当前已禁用快速编辑，如需复制链接，请先按 CTRL+M 临时开启选择功能，然后选择要复制的区域，按 CTRL+C 进行复制\n"
+        "（如果点击后会退出，也可以点击命令栏左上角图标，编辑->标记，然后选择复制区域来复制即可）"
+    )
+
+
+def change_title(dlc_info="", monthly_pay_info="", multiprocessing_pool_size=0, enable_super_fast_mode=False):
+    if dlc_info == "" and exists_auto_updater_dlc():
+        dlc_info = " 自动更新豪华升级版"
+
+    pool_info = ""
+    if multiprocessing_pool_size != 0:
+        pool_info = f"火力全开版本({multiprocessing_pool_size})"
+        if enable_super_fast_mode:
+            pool_info = "超级" + pool_info
+
+    set_title_cmd = f"title DNF蚊子腿小助手 {dlc_info} {monthly_pay_info} {pool_info} v{now_version} {ver_time} by风之凌殇 {get_random_face()}"
+    if is_windows():
+        os.system(set_title_cmd)
+    else:
+        logger.info(color("bold_yellow") + set_title_cmd)
+
+
+def gen_config_for_github_action_json_single_line(github_action_config_path="config.toml.github_action"):
+    target_filepath = f"{github_action_config_path}.json"
+
+    with open(github_action_config_path, encoding="utf-8") as toml_file:
+        with open(target_filepath, "w", encoding="utf-8") as save_file:
+            cfg = toml.load(toml_file)
+            json.dump(cfg, save_file)
+
+    show_file_content_info("json版本", pathlib.Path(target_filepath).read_text())
+
+
+def json_to_toml(github_action_config_json: str) -> str:
+    return toml.dumps(json.loads(github_action_config_json))
+
+
+def uin2qq(uin):
+    return str(uin)[1:].lstrip("0")
+
+
+def is_valid_qq(qq: str) -> bool:
+    return qq.isnumeric()
+
+
+def exists_flag_file(flag_file_name: str) -> bool:
+    return os.path.exists(flag_file_name)
 
 
 def printed_width(msg):
@@ -481,50 +717,6 @@ def with_retry(max_retry_count=3, retry_wait_time=5, show_exception_info=True) -
     return decorator
 
 
-def check_some_exception(e: Exception, show_last_process_result=True) -> str:
-    msg = ""
-
-    def format_msg(msg, _color="bold_yellow"):
-        return "\n" + color(_color) + msg + asciiReset
-
-    # 特判一些错误
-    if type(e) is KeyError and e.args[0] == "modRet":
-        msg += format_msg(
-            "大概率是这个活动过期了，或者放鸽子到点了还没开放，若影响正常运行流程，可先自行关闭这个活动开关(若config.toml中没有，请去config.example.toml找到对应开关名称)，或等待新版本（日常加班，有时候可能会很久才发布新版本）"
-        )
-    elif type(e) in [
-        socket.timeout,
-        urllib3.exceptions.ConnectTimeoutError,
-        urllib3.exceptions.MaxRetryError,
-        urllib3.exceptions.ReadTimeoutError,
-        requests.exceptions.ConnectTimeout,
-        requests.exceptions.ReadTimeout,
-    ]:
-        msg += format_msg("网络超时了，一般情况下是因为网络问题，也有可能是因为对应网页的服务器不太行，多试几次就好了<_<")
-    elif type(e) in [
-        selenium.common.exceptions.TimeoutException,
-    ]:
-        msg += format_msg("浏览器等待对应元素超时了，很常见的。如果一直超时导致无法正常运行，可去config.example.toml将登录超时相关配置加到config.toml中，并调大超时时间")
-    elif type(e) in [
-        PermissionError,
-    ]:
-        msg += format_msg(
-            "权限错误一般是以下原因造成的\n"
-            "1. 该文件被占用，比如打开了多个小助手实例或者其他应用占用了这些文件，可以尝试重启电脑后再运行\n"
-            "2. 开启了VPN，请尝试关闭VPN后再运行（看上去毫不相关，但确实会这样- -）"
-        )
-
-    if show_last_process_result:
-        from network import last_response_info
-
-        if last_response_info is not None:
-            lr = last_response_info
-            text = parse_unicode_escape_string(lr.text)
-            msg += format_msg(f"最近一次收到的请求结果为：status_code={lr.status_code} reason={lr.reason} \n{text}", "bold_cyan")
-
-    return msg
-
-
 def is_act_expired(end_time: str, time_fmt="%Y-%m-%d %H:%M:%S", now: Optional[datetime.datetime] = None) -> bool:
     now = now or get_now()
     return datetime.datetime.strptime(end_time, time_fmt) < now
@@ -556,20 +748,23 @@ def show_end_time(end_time, time_fmt="%Y-%m-%d %H:%M:%S"):
 
 
 def time_less(left_time_str, right_time_str, time_fmt="%Y-%m-%d %H:%M:%S") -> bool:
-    left_time = datetime.datetime.strptime(left_time_str, time_fmt)
-    right_time = datetime.datetime.strptime(right_time_str, time_fmt)
+    left_time = parse_time(left_time_str, time_fmt)
+    right_time = parse_time(right_time_str, time_fmt)
 
     return left_time < right_time
 
 
+@lru_cache(maxsize=None)
 def parse_time(time_str, time_fmt="%Y-%m-%d %H:%M:%S") -> datetime.datetime:
     return datetime.datetime.strptime(time_str, time_fmt)
 
 
+@lru_cache(maxsize=None)
 def parse_timestamp(ts: float) -> datetime.datetime:
     return datetime.datetime.fromtimestamp(ts)
 
 
+@lru_cache(maxsize=None)
 def format_time(dt, time_fmt="%Y-%m-%d %H:%M:%S") -> str:
     return dt.strftime(time_fmt)
 
@@ -579,76 +774,13 @@ def format_now(time_fmt="%Y-%m-%d %H:%M:%S", now: Optional[datetime.datetime] = 
     return format_time(now, time_fmt=time_fmt)
 
 
+@lru_cache(maxsize=None)
 def format_timestamp(ts: float):
     return format_time(parse_timestamp(ts))
 
 
 def async_call(cb, *args, **params):
     threading.Thread(target=cb, args=args, kwargs=params, daemon=True).start()
-
-
-def async_message_box(
-    msg,
-    title,
-    print_log=True,
-    icon=MB_ICONINFORMATION,
-    open_url="",
-    show_once=False,
-    follow_flag_file=True,
-    color_name="bold_cyan",
-    open_image="",
-    show_once_daily=False,
-):
-    async_call(
-        message_box,
-        msg,
-        title,
-        print_log,
-        icon,
-        open_url,
-        show_once,
-        follow_flag_file,
-        color_name,
-        open_image,
-        show_once_daily,
-    )
-
-
-def message_box(
-    msg,
-    title,
-    print_log=True,
-    icon=MB_ICONINFORMATION,
-    open_url="",
-    show_once=False,
-    follow_flag_file=True,
-    color_name="bold_cyan",
-    open_image="",
-    show_once_daily=False,
-):
-    get_log_func(logger.warning, print_log)(color(color_name) + msg)
-
-    if is_run_in_github_action():
-        return
-
-    from first_run import is_daily_first_run, is_first_run
-
-    show_message_box = True
-    if show_once and not is_first_run(f"message_box_{title}"):
-        show_message_box = False
-    if show_once_daily and not is_daily_first_run(f"daily_message_box_{title}"):
-        show_message_box = False
-    if follow_flag_file and exists_flag_file(".no_message_box"):
-        show_message_box = False
-
-    if show_message_box and is_windows():
-        win32api.MessageBox(0, msg, title, icon)
-
-        if open_url != "":
-            webbrowser.open(open_url)
-
-        if open_image != "":
-            os.popen(os.path.realpath(open_image))
 
 
 KiB = 1024
@@ -670,7 +802,58 @@ def human_readable_size(num, suffix="B") -> str:
 
 
 @try_except()
+def remove_old_version_portable_chrome_files(current_chrome_version: int):
+    """清理非当前版本的便携版chrome相关文件，避免占用过多空间
+
+    主要包括下列文件或目录
+    1. chromedriver_{ver}.exe
+    2. chrome_portable_{ver}.7z
+    3. chrome_portable_{ver}
+    """
+    logger.info(color("bold_green") + f"开始尝试清理非当前版本的便携版chrome相关文件，当前chrome版本为{current_chrome_version}")
+
+    chrome_file_regex = [
+        r"chromedriver_(?P<version>\d+)\.exe",
+        r"chrome_portable_(?P<version>\d+)\.7z",
+        r"chrome_portable_(?P<version>\d+)",
+    ]
+
+    total_remove = 0
+
+    for path in pathlib.Path("utils").glob("*"):
+        # 尝试解析版本信息
+        version = 0
+        for regex in chrome_file_regex:
+            match = re.match(regex, path.name)
+            if not match:
+                continue
+
+            version = int(match.group("version"))
+            break
+
+        if version == 0 or version == current_chrome_version:
+            # 不是需要清理的文件
+            continue
+
+        # 清除该文件或目录
+        target_path = os.path.realpath(str(path))
+        target_size = get_file_or_directory_size(target_path)
+
+        logger.info(f"开始移除 {target_path}，其大小为 {human_readable_size(target_size)}")
+        remove_file_or_directory(target_path)
+        total_remove += target_size
+
+    if total_remove > 0:
+        logger.info(color("bold_green") + f"清理完成，共移除 {human_readable_size(total_remove)}")
+    else:
+        logger.info(color("bold_green") + "没有需要移除的文件")
+
+
+@try_except()
 def clean_dir_to_size(dir_name: str, max_logs_size: int = 1024 * MiB, keep_logs_size: int = 512 * MiB):
+    if keep_logs_size > max_logs_size:
+        keep_logs_size = max_logs_size // 2
+
     # 检查一下是否存在目录
     if not os.path.isdir(dir_name):
         return
@@ -707,8 +890,9 @@ def clean_dir_to_size(dir_name: str, max_logs_size: int = 1024 * MiB, keep_logs_
         remove_log_size += stat.st_size
 
         os.remove(f"{log_file}")
+        relative_filepath = os.path.relpath(str(log_file), dir_name)
         logger.info(
-            f"移除第{remove_log_count}个日志:{log_file.name} 大小：{hrs(stat.st_size)}，剩余日志大小为{hrs(remaining_logs_size)}"
+            f"移除第{remove_log_count}个日志:{relative_filepath} 大小：{hrs(stat.st_size)}，剩余日志大小为{hrs(remaining_logs_size)}"
         )
 
         if remaining_logs_size <= keep_logs_size:
@@ -717,6 +901,16 @@ def clean_dir_to_size(dir_name: str, max_logs_size: int = 1024 * MiB, keep_logs_
                 + f"当前剩余日志大小为{hrs(remaining_logs_size)}，将停止日志清理流程~ 本次累计清理{remove_log_count}个日志文件，总大小为{hrs(remove_log_size)}"
             )
             break
+
+
+def get_file_or_directory_size(target_path: str) -> int:
+    if not os.path.exists(target_path):
+        return 0
+
+    if os.path.isfile(target_path):
+        return os.stat(target_path).st_size
+    else:
+        return get_directory_size(target_path)
 
 
 def get_directory_size(dir_name: str) -> int:
@@ -757,17 +951,6 @@ def clear_login_status():
     for cache_file in saved_login_cache_files:
         os.remove(cache_file)
         logger.info(f"移除缓存的登录信息：{cache_file}")
-
-
-def get_screen_size() -> Tuple[int, int]:
-    """
-    :return: 屏幕宽度和高度
-    """
-    if not is_windows():
-        return 1920, 1080
-
-    width, height = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
-    return width, height
 
 
 def make_sure_dir_exists(dir_path):
@@ -824,17 +1007,6 @@ def gen_config_for_github_action_base64(
     show_file_content_info(ctx, pathlib.Path(target_filepath).read_text())
 
 
-def gen_config_for_github_action_json_single_line(github_action_config_path="config.toml.github_action"):
-    target_filepath = f"{github_action_config_path}.json"
-
-    with open(github_action_config_path, encoding="utf-8") as toml_file:
-        with open(target_filepath, "w", encoding="utf-8") as save_file:
-            cfg = toml.load(toml_file)
-            json.dump(cfg, save_file)
-
-    show_file_content_info("json版本", pathlib.Path(target_filepath).read_text())
-
-
 def show_file_content_info(ctx: str, file_content: str):
     total_size = len(file_content)
     total_lines = file_content.count("\n") + 1
@@ -847,10 +1019,6 @@ def base64_to_toml(github_action_config_base64: str, compress_before_encode=Fals
         toml_bytes = decompress_in_memory_with_lzma(toml_bytes)
 
     return toml_bytes.decode()
-
-
-def json_to_toml(github_action_config_json: str) -> str:
-    return toml.dumps(json.loads(github_action_config_json))
 
 
 def disable_pause_after_run() -> bool:
@@ -899,6 +1067,7 @@ def with_cache(
     force_update=False,
     cache_value_unmarshal_func: Optional[Callable[[Any], Any]] = None,
     cache_hit_func: Optional[Callable[[Any], None]] = None,
+    return_none_on_exception=False,
 ):
     """
 
@@ -946,8 +1115,11 @@ def with_cache(
         latest_value = cache_miss_func()
     except Exception as e:
         logger.error(f"更新缓存时出错了 {cache_category} {cache_key}", exc_info=e)
-        # 无法获取最新数据时，则保底使用最后一次缓存的数据
-        latest_value = cached_value
+        if not return_none_on_exception:
+            # 无法获取最新数据时，则保底使用最后一次缓存的数据
+            latest_value = cached_value
+        else:
+            latest_value = None
 
     cache_info = CacheInfo()
     cache_info.value = latest_value
@@ -1028,56 +1200,6 @@ def append_if_not_in(vlist: list, val: Any) -> list:
 def wait_for(msg: str, seconds):
     logger.info(msg + f", 等待{seconds}秒")
     time.sleep(seconds)
-
-
-def show_unexpected_exception_message(e: Exception):
-    from config import Config, config
-
-    time_since_release = get_now() - parse_time(ver_time, "%Y.%m.%d")
-    cfg = Config()
-    try:
-        cfg = config()
-    except Exception:
-        pass
-    msg = (
-        f"ver {now_version} (发布于{ver_time}，距今已有{time_since_release.days}天啦) 运行过程中出现未捕获的异常，请加群{cfg.common.qq_group}反馈或自行解决。"
-        + check_some_exception(e)
-    )
-    logger.exception(color("fg_bold_yellow") + msg, exc_info=e)
-    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
-    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
-    logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
-    logger.warning(color("fg_bold_green") + "如果要反馈，请把整个窗口都截图下来- -不要只截一部分")
-    logger.warning(color("fg_bold_yellow") + "不要自动无视上面这三句话哦，写出来是让你看的呀<_<不知道出啥问题的时候就按提示去看看是否有新版本哇，而不是不管三七二十一就来群里问嗷")
-    logger.warning(color("fg_bold_cyan") + f"链接：{cfg.common.netdisk_link}")
-
-    if run_from_src():
-        show_head_line(
-            "目前使用的是源码版本，出现任何问题请自行调试或google解决，这是使用源码版本的前提。另外，在出问题时，建议先尝试更新依赖库，确保与依赖配置中的版本匹配。", color("bold_yellow")
-        )
-
-
-def disable_quick_edit_mode():
-    if not is_windows():
-        return
-
-    # https://docs.microsoft.com/en-us/windows/console/setconsolemode
-    def _cb():
-        ENABLE_EXTENDED_FLAGS = 0x0080
-
-        logger.info(color("bold_green") + "将禁用命令行的快速编辑模式，避免鼠标误触时程序暂停，若需启用，请去配置文件取消禁用快速编辑模式~")
-        show_quick_edit_mode_tip()
-        kernel32 = ctypes.windll.kernel32
-        kernel32.SetConsoleMode(kernel32.GetStdHandle(win32api.STD_INPUT_HANDLE), ENABLE_EXTENDED_FLAGS)
-
-    async_call(_cb)
-
-
-def show_quick_edit_mode_tip():
-    logger.info(
-        color("bold_blue") + "当前已禁用快速编辑，如需复制链接，请先按 CTRL+M 临时开启选择功能，然后选择要复制的区域，按 CTRL+C 进行复制\n"
-        "（如果点击后会退出，也可以点击命令栏左上角图标，编辑->标记，然后选择复制区域来复制即可）"
-    )
 
 
 def is_run_in_pycharm() -> bool:
@@ -1241,6 +1363,7 @@ def start_djc_helper(exe_path: str):
     logger.info(f"{exe_path} 已经启动~")
 
 
+@try_except()
 def sync_configs(source_dir: str, target_dir: str):
     """
     将指定的配置相关文件从 源目录 覆盖到 目标目录
@@ -1255,7 +1378,7 @@ def sync_configs(source_dir: str, target_dir: str):
         "不查询活动.txt",
         ".no_message_box",
         # 缓存文件所在目录
-        ".db",
+        db_top_dir,
         # # 自动更新DLC
         # "utils/auto_updater.exe"
     ]
@@ -1330,25 +1453,6 @@ def get_path_in_onedrive(relative_path: str) -> str:
     return os.path.realpath(os.path.join(get_user_dir(), "OneDrive", relative_path))
 
 
-def change_title(dlc_info="", monthly_pay_info="", multiprocessing_pool_size=0, enable_super_fast_mode=False):
-    if dlc_info == "" and exists_auto_updater_dlc():
-        dlc_info = " 自动更新豪华升级版"
-
-    pool_info = ""
-    if multiprocessing_pool_size != 0:
-        pool_info = f"火力全开版本({multiprocessing_pool_size})"
-        if enable_super_fast_mode:
-            pool_info = "超级" + pool_info
-
-    set_title_cmd = (
-        f"title DNF蚊子腿小助手 {dlc_info} {monthly_pay_info} {pool_info} v{now_version} by风之凌殇 {get_random_face()}"
-    )
-    if is_windows():
-        os.system(set_title_cmd)
-    else:
-        logger.info(color("bold_yellow") + set_title_cmd)
-
-
 def exists_auto_updater_dlc():
     return os.path.isfile(auto_updater_path())
 
@@ -1371,9 +1475,21 @@ def get_cid():
     return f"{platform.node()}-{uuid.getnode()}"
 
 
-def get_resolution() -> str:
-    width, height = get_screen_size()
-    return f"{width}x{height}"
+def is_valid_json_file(json_file: str) -> bool:
+    try:
+        with open(json_file, encoding="utf-8") as jf:
+            return is_valid_json(jf.read())
+    except Exception:
+        return False
+
+
+def is_valid_json(json_data: str) -> bool:
+    try:
+        json.loads(json_data)
+
+        return True
+    except Exception:
+        return False
 
 
 def bypass_proxy():
@@ -1396,6 +1512,16 @@ def parse_scode(scode_or_url: str) -> str:
         # https://dnf.qq.com/cp/a20210730care/index.html?sCode=MDJKQ0t5dDJYazlMVmMrc2ZXV0tVT0xsZitZMi9YOXZUUFgxMW1PcnQ2Yz0=
         parsed = parse.urlparse(scode_or_url)
         return parse.parse_qs(parsed.query)["sCode"][0]
+
+
+def parse_url_param(url: str, param: str) -> str:
+    parsed = parse.urlparse(url)
+    kvs = parse.parse_qs(parsed.query)
+
+    if param not in kvs:
+        return ""
+
+    return kvs[param][0]
 
 
 def pause():
@@ -1453,6 +1579,37 @@ def triple_quote(strToQuote: str) -> str:
     return quote_plus(double_quote(strToQuote))
 
 
+def show_progress(file_name: str, total_size: int, now_size: int):
+    """显示进度的回调函数"""
+    percent = now_size / total_size
+    bar_len = 40  # 进度条长总度
+    bar_str = ">" * round(bar_len * percent) + "=" * round(bar_len * (1 - percent))
+    show_percent = percent * 100
+    now_mb = now_size / 1048576
+    total_mb = total_size / 1048576
+    print(f"\r{show_percent:.2f}%\t[{bar_str}] {now_mb:.2f}/{total_mb:.2f}MB | {file_name} ", end="")
+    if total_size == now_size:
+        print("")  # 下载完成换行
+
+
+def post_json_to_data(json_data: Dict[str, Any]) -> str:
+    return "&".join([f"{k}={v}" for k, v in json_data.items()])
+
+
+def clear_file(file_path: str):
+    with open(file_path, "w"):
+        pass
+
+
+def demo_remove_chrome():
+    from config import config
+    from qq_login import QQLogin
+
+    cfg = config()
+    current_chrome_version = QQLogin(cfg.common).get_chrome_major_version()
+    remove_old_version_portable_chrome_files(current_chrome_version)
+
+
 if __name__ == "__main__":
     # print(get_now_unix())
     # print(get_this_week_monday())
@@ -1472,6 +1629,9 @@ if __name__ == "__main__":
 
     # print(start_and_end_date_of_a_month(get_now()))
 
-    clear_login_status()
+    # clear_login_status()
 
+    # message_box("测试弹窗内容", "测试标题", use_qt_messagebox=True)
+
+    demo_remove_chrome()
     pass

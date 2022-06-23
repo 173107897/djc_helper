@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 # 使用次数统计脚本
 import os
 from typing import Any
 
 import leancloud
-import leancloud.object_
 
 import ga
 import ga4
@@ -24,7 +25,7 @@ def increase_counter(
     report_to_google_analytics=True,
     ga_type=ga.GA_REPORT_TYPE_EVENT,
     ga_category="",
-    ga_misc_params: dict = None,
+    ga_misc_params: dict | None = None,
 ):
     name = str(name)
 

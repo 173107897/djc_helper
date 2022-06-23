@@ -3,14 +3,22 @@ import os
 import re
 from collections import namedtuple
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 
 from compress import compress_file_with_lzma, decompress_file_with_lzma
 from const import compressed_temp_dir, downloads_dir
 from lanzou.api import LanZouCloud
 from lanzou.api.types import FileInFolder, FolderDetail
 from log import color, get_log_func, logger
-from util import cache_name_download, human_readable_size, make_sure_dir_exists, parse_time, parse_timestamp, with_cache
+from util import (
+    cache_name_download,
+    human_readable_size,
+    make_sure_dir_exists,
+    parse_time,
+    parse_timestamp,
+    show_progress,
+    with_cache,
+)
 
 Folder = namedtuple("Folder", ["name", "id", "url", "password"])
 
@@ -65,7 +73,14 @@ class Uploader:
         self.lzy = LanZouCloud()
         self.login_ok = False
 
-    def login(self, cookie):
+        self.lzy._timeout = 5
+
+    def login(self, cookie: str = ""):
+        # 仅上传需要登录
+        if cookie == "":
+            with open("upload_cookie.json") as fp:
+                cookie = json.load(fp)
+
         # 仅上传需要登录
         self.login_ok = self.lzy.login_by_cookie(cookie) == LanZouCloud.SUCCESS
 
@@ -141,7 +156,7 @@ class Uploader:
             self.lzy.move_file(fid, target_folder.id)
 
         # 上传到指定的文件夹中
-        retCode = self.lzy.upload_file(filepath, -1, callback=self.show_progress, uploaded_handler=on_uploaded)
+        retCode = self.lzy.upload_file(filepath, -1, callback=show_progress, uploaded_handler=on_uploaded)
         if retCode != LanZouCloud.SUCCESS:
             logger.error(f"上传失败，retCode={retCode}")
             return False
@@ -255,7 +270,8 @@ class Uploader:
         try_compressed_version_first=False,
         cache_max_seconds=600,
         download_only_if_server_version_is_newer=True,
-    ) -> str:
+        return_none_on_exception=False,
+    ) -> Optional[str]:
         """
         下载网盘指定文件夹的指定文件到本地指定目录，并返回最终本地文件的完整路径
         """
@@ -273,6 +289,7 @@ class Uploader:
                     download_only_if_server_version_is_newer=download_only_if_server_version_is_newer,
                 ),
                 cache_validate_func=lambda target_path: os.path.isfile(target_path),
+                return_none_on_exception=return_none_on_exception,
             )
 
         if try_compressed_version_first:
@@ -372,7 +389,7 @@ class Uploader:
         get_log_func(logger.info, show_log)(f"即将开始下载 {target_path.value}")
         callback = None
         if show_log:
-            callback = self.show_progress
+            callback = show_progress
         retCode = self.down_file_by_url(
             fileinfo.url, "", download_dir, callback=callback, downloaded_handler=after_downloaded, overwrite=overwrite
         )
@@ -396,18 +413,6 @@ class Uploader:
             raise Exception("下载失败")
 
         return target_path.value
-
-    def show_progress(self, file_name, total_size, now_size):
-        """显示进度的回调函数"""
-        percent = now_size / total_size
-        bar_len = 40  # 进度条长总度
-        bar_str = ">" * round(bar_len * percent) + "=" * round(bar_len * (1 - percent))
-        show_percent = percent * 100
-        now_mb = now_size / 1048576
-        total_mb = total_size / 1048576
-        print(f"\r{show_percent:.2f}%\t[{bar_str}] {now_mb:.2f}/{total_mb:.2f}MB | {file_name} ", end="")
-        if total_size == now_size:
-            print("")  # 下载完成换行
 
     def get_folder_info_by_url(self, share_url, dir_pwd="", get_this_page=0) -> FolderDetail:
         for possiable_url in self.all_possiable_urls(share_url):

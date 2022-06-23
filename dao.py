@@ -11,7 +11,7 @@ class DaoObject:
 
 
 class GameInfo(DaoObject):
-    def __init__(self, data):
+    def __init__(self, data: dict):
         self.bizName = data["bizName"]
         self.bizCode = data["bizCode"]
         self.gameCode = data["gameCode"]
@@ -868,15 +868,44 @@ class BuyInfo(ConfigInterface):
             return timedelta()
 
     def description(self) -> str:
+        from util import exists_flag_file
+
+        show_all_records_flag_file = "展示全部购买记录"
+
         buy_accounts = self.qq
 
         msg = f"主QQ {buy_accounts} 付费内容过期时间为{self.expire_at}，累计购买{self.total_buy_month}个月。"
         if len(self.game_qqs) != 0:
             msg += f"\n附属QQ {', '.join(self.game_qqs)}"
+
         if len(self.buy_records) != 0:
-            msg += "\n购买详情如下：\n" + "\n".join(
-                "\t" + f"{record.buy_at} {record.reason} {record.buy_month} 月" for record in self.buy_records
-            )
+            record_description_list: list[str] = []
+            if len(self.buy_records) <= 5 or exists_flag_file(show_all_records_flag_file):
+                # 较少的记录，或者强制开启时，展示全部记录
+                record_description_list = [record.description() for record in self.buy_records]
+            else:
+                # 记录过多时，略过中间部分
+                front_count = 2
+                back_count = 3
+
+                # 开始的照常显示
+                for record in self.buy_records[:front_count]:
+                    record_description_list.append(record.description())
+
+                # 中间的藏起来
+                mid_date_placeholder = "." * 10
+                mid_time_placeholder = "." * 8
+                mid_total_month = sum(record.buy_month for record in self.buy_records[front_count:-back_count])
+                record_description_list.append(
+                    f"{mid_date_placeholder} {mid_time_placeholder} 由于篇幅原因，中间购买的 {mid_total_month} 个月将不显示，可创建名为 {show_all_records_flag_file} 的文件或目录 来强制显示全部记录"
+                )
+
+                # 末尾的也照常显示
+                for record in self.buy_records[-back_count:]:
+                    record_description_list.append(record.description())
+
+            # 拼接记录
+            msg += "\n购买详情如下：\n" + "\n".join("\t" + desc for desc in record_description_list)
 
         msg += "\n"
         msg += "\n通过配置工具直接购买或者使用卡密购买，无需私聊告知，等待10到20分钟左右后即可到账。目前有缓存机制，可能不能及时查询到最新信息~"
@@ -908,6 +937,9 @@ class BuyRecord(ConfigInterface):
 
     def is_dlc_reward(self) -> bool:
         return self.reason.startswith("自动更新DLC赠送")
+
+    def description(self) -> str:
+        return f"{self.buy_at} {self.reason} {self.buy_month} 月"
 
 
 class OrderInfo(ConfigInterface):
@@ -1726,6 +1758,13 @@ class MoJieRenInfo(ConfigInterface):
         self.inviteList = []
         self.task = {}
 
+    def on_config_update(self, raw_config: dict):
+        # 首次查询时，部分字段会是null，需要修改为正确的值，确保后续逻辑无误
+        # "iCurrPos": null, "iCurrRound": null, "iExploreTimes": null
+        self.iCurrPos = self.iCurrPos or "1"
+        self.iCurrRound = self.iCurrRound or "1"
+        self.iExploreTimes = self.iExploreTimes or "0"
+
 
 class MoJieRenHoldInfo(ConfigInterface):
     def __init__(self):
@@ -1755,6 +1794,71 @@ class MaJieLuoInfo(ConfigInterface):
         self.iFuqi = "40"
         self.iPassed = "0"
         self.iLuck = "0"
+
+
+class VoteWorkList(ConfigInterface):
+    def __init__(self):
+        self.iRet = "0"
+        self.sMsg = "ok"
+        self.data: list[VoteWorkInfo] = []
+
+    def fields_to_fill(self) -> list[tuple[str, type[ConfigInterface]]]:
+        return [
+            ("data", VoteWorkInfo),
+        ]
+
+
+class VoteWorkInfo(ConfigInterface):
+    def __init__(self):
+        self.tickets = 9064
+        self.title = "鹿王本生-女鬼剑士"
+        self.workId = "21"
+
+
+class VoteEndWorkList(ConfigInterface):
+    def __init__(self):
+        self.iRet = "0"
+        self.data: dict[int, str] = {}
+
+
+class VoteEndWorkInfo(ConfigInterface):
+    def __init__(self):
+        self.tickets = 9064
+        self.workId = "21"
+
+
+class DnfHelperChronicleBindInfo(ConfigInterface):
+    def __init__(self):
+        self.is_need_transfer = True
+        self.is_allow_enter = False
+        self.is_roleid_bind_userid_match = False
+        self.tip = ""
+        self.tip_title = ""
+
+
+class MyHomeGiftList(ConfigInterface):
+    def __init__(self):
+        self.jData: list[MyHomeGift] = []
+
+    def fields_to_fill(self) -> list[tuple[str, type[ConfigInterface]]]:
+        return [
+            ("jData", MyHomeGift),
+        ]
+
+
+class MyHomeGift(ConfigInterface):
+    def __init__(self):
+        self.id = "176718"
+        self.iUin = "1054073896"
+        self.iPropId = "2109723"
+        self.sPropName = "+10 装备增幅券"
+        self.iType = "2"
+        self.iPoints = "1600"
+        self.iTimes = "1"
+        self.iUsedNum = "0"
+        self.discount = "100"
+        self.dDate = "2022-06-16"
+        self.dtCreateAt = "2022-06-16 21:07:14"
 
 
 if __name__ == "__main__":

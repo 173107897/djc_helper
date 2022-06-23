@@ -26,7 +26,11 @@ from config import AccountConfig, CommonConfig, config, load_config
 from dao import GuanJiaUserInfo
 from data_struct import ConfigInterface
 from db import CaptchaDB, LoginRetryDB
-from exceptions_def import GithubActionLoginException, SameAccountTryLoginAtMultipleThreadsException
+from exceptions_def import (
+    GithubActionLoginException,
+    RequireVerifyMessageButInHeadlessMode,
+    SameAccountTryLoginAtMultipleThreadsException,
+)
 from first_run import is_first_run_in
 from log import color, logger
 from upload_lanzouyun import Uploader
@@ -44,7 +48,7 @@ from util import (
     try_except,
     use_by_myself,
 )
-from version import now_version
+from version import now_version, ver_time
 
 if is_windows():
     import win32con
@@ -108,9 +112,22 @@ class QQLogin:
     login_mode_club_vip = "club_vip"
     login_mode_iwan = "iwan"
 
+    login_mode_to_description = {
+        login_mode_normal: "普通",
+        login_mode_xinyue: "心悦",
+        login_mode_qzone: "QQ空间",
+        login_mode_guanjia: "电脑管家",
+        login_mode_wegame: "Wegame",
+        login_mode_club_vip: "club.vip",
+        login_mode_iwan: "爱玩",
+    }
+
     bandizip_executable_path = os.path.realpath("./utils/bandizip_portable/bz.exe")
 
-    # note: chrome版本升级流程
+    # re: chrome版本一键升级流程
+    #  0. 使用 _update_chrome.py 脚本，按照提示操作即可获取最新稳定版本chrome的便携版、driver、安装包等
+    # .
+    # note: chrome版本手动升级流程
     #  1. 下载新版本chrome driver => chromedriver_{ver}.exe
     #   1.1 https://sites.google.com/chromium.org/driver/downloads
     #  2. 制作新版本便携版压缩包 => chrome_portable_{ver}.7z
@@ -124,9 +141,10 @@ class QQLogin:
     #           2.1.2.1 下载地址
     #               2.1.2.1.1 https://www.iplaysoft.com/tools/chrome/
     #           2.1.2.2 下载内容形如90.0.4430.93_chrome_installer.exe，使用bandizip打开然后解压得到chrome.7z，即可进行下一步
-    #   2.2 将chrome.7z解压然后重新压缩，得到chrome_portable_90.7z
+    #   2.2 将chrome.7z解压然后重新压缩，得到 chrome_portable_90.7z
     #       2.2.1 确保chrome_portable_90.7z压缩包的首层目录形如（89.0.4389.72、chrome.exe、chrome_proxy.exe）
     #  3. 替换chromedriver_{ver}.exe和chrome_portable_{ver}.7z到小助手 utils 目录下
+    #   3.1 修改版本号为 {ver} 后，测试下登录流程
     # todo:
     #  4. 下载新版本安装包 => Chrome_92.0.4515.131_普通安装包_非便携版.exe
     #       4.1 https://www.iplaysoft.com/tools/chrome/
@@ -136,8 +154,8 @@ class QQLogin:
     #       5.1 Chrome_92.0.4515.131_普通安装包_非便携版.exe
     # undone:
     #  6. 更新linux版的路径
-    #       6.1 _centos_download_and_install_chrome_and_driver.sh
-    #       6.2 _ubuntu_download_chrome_and_driver.sh
+    #       6.1 _ubuntu_download_chrome_and_driver.sh
+    #       6.2 _centos_download_and_install_chrome_and_driver.sh
     # re:
     #  7. 入库以下文件
     #       qq_login.py
@@ -145,7 +163,7 @@ class QQLogin:
     #       chrome_portable_{ver}.7z
     #       _centos_download_and_install_chrome_and_driver.sh
     #       _ubuntu_download_chrome_and_driver.sh
-    chrome_major_version = 96
+    chrome_major_version = 102
 
     default_window_width = 390
     default_window_height = 360
@@ -169,6 +187,7 @@ class QQLogin:
             + f"{self.name} 正在初始化chrome driver（版本为{self.get_chrome_major_version()}），用以进行【{ctx}】相关操作。"
             f"浏览器坐标：({self.window_position_x}, {self.window_position_y})@{self.default_window_width}*{self.default_window_height}({self.screen_width}*{self.screen_height})"
         )
+        self.login_url = login_url
         logger.info(color("bold_green") + f"{self.name} {ctx} 登录链接为: {login_url}")
         caps = DesiredCapabilities().CHROME
         # caps["pageLoadStrategy"] = "normal"  #  Waits for full page load
@@ -275,8 +294,11 @@ class QQLogin:
         options.add_argument(f"app={login_url}")
         # 设置静音
         options.add_argument("--mute-audio")
+
+        exclude_switches = []
+
         if not self.cfg._debug_show_chrome_logs:
-            options.add_experimental_option("excludeSwitches", ["enable-logging"])
+            exclude_switches.append("enable-logging")
             selenium_logger = logging.getLogger("selenium.webdriver.remote.remote_connection")
             selenium_logger.setLevel(logging.WARNING)
             # 使用Selenium期间将urllib的日志关闭
@@ -293,6 +315,17 @@ class QQLogin:
         if not is_windows():
             options.headless = True
             logger.warning(f"{self.name} 在linux环境下强制使用headless模式运行chrome")
+
+        # 隐藏提示：Chrome 正收到自动测试软件的控制。
+        exclude_switches.append("enable-automation")
+
+        if len(exclude_switches) != 0:
+            options.add_experimental_option("excludeSwitches", exclude_switches)
+
+        # 隐藏保存密码的提示窗
+        options.add_experimental_option(
+            "prefs", {"credentials_enable_service": False, "profile": {"password_manager_enabled": False}}
+        )
 
     def destroy_chrome(self):
         logger.info(f"{self.name} 释放chrome实例")
@@ -342,7 +375,10 @@ class QQLogin:
         options.add_experimental_option("excludeSwitches", ["enable-logging"])
         if not self.cfg.force_use_portable_chrome:
             try:
-                logger.info("检查系统自带的chrome是否可用")
+                logger.info(
+                    color("bold_green")
+                    + "检查系统自带的chrome是否可用，如果一直卡在这里，请试试打开【配置工具/公共配置/登录/强制使用便携版chrome】开关后，再次运行~。如果安装了【360浏览器/qq浏览器】，可以先试试把chrome修改为默认浏览器，或者卸载掉他们，然后重启电脑后再运行小助手试试。"
+                )
                 self.driver = webdriver.Chrome(
                     service=Service(executable_path=self.chrome_driver_executable_path()), options=options
                 )
@@ -470,7 +506,7 @@ class QQLogin:
         else:
             return self.cfg.force_use_chrome_major_version
 
-    def login(self, account, password, login_mode="normal", name=""):
+    def login(self, account, password, login_mode: str, name=""):
         """
         自动登录指定账号，并返回登陆后的cookie中包含的uin、skey数据
         :param account: 账号
@@ -485,28 +521,36 @@ class QQLogin:
         def login_with_account_and_password():
             logger.info(color("bold_green") + f"{name} 当前为自动登录模式，请不要手动操作网页，否则可能会导致登录流程失败")
 
-            # 切换到自动登录界面
-            logger.info(f"{name} 等待#switcher_plogin加载完毕")
-            time.sleep(self.cfg.login.open_url_wait_time)
-            WebDriverWait(self.driver, self.cfg.login.load_login_iframe_timeout).until(
-                expected_conditions.visibility_of_element_located((By.ID, "switcher_plogin"))
-            )
+            logger.info("由于账号密码登录有可能会触发短信验证，因此优先尝试点击头像来登录~")
+            login_by_click_avatar_success = self.try_auto_click_avatar(account, name, self.login_type_auto_login)
 
-            # 选择密码登录
-            self.driver.find_element(By.ID, "switcher_plogin").click()
+            if login_by_click_avatar_success:
+                logger.info("使用头像点击登录成功")
+            else:
+                logger.warning("点击头像登录失败，尝试输入账号密码来进行登录")
 
-            # 输入账号
-            self.driver.find_element(By.ID, "u").clear()
-            self.driver.find_element(By.ID, "u").send_keys(account)
-            # 输入密码
-            self.driver.find_element(By.ID, "p").clear()
-            self.driver.find_element(By.ID, "p").send_keys(password)
+                # 切换到自动登录界面
+                logger.info(f"{name} 等待#switcher_plogin加载完毕")
+                time.sleep(self.cfg.login.open_url_wait_time)
+                WebDriverWait(self.driver, self.cfg.login.load_login_iframe_timeout).until(
+                    expected_conditions.visibility_of_element_located((By.ID, "switcher_plogin"))
+                )
 
-            logger.info(f"{name} 等待一会，确保登录键可以点击")
-            time.sleep(3)
+                # 选择密码登录
+                self.driver.find_element(By.ID, "switcher_plogin").click()
 
-            # 发送登录请求
-            self.driver.find_element(By.ID, "login_button").click()
+                # 输入账号
+                self.driver.find_element(By.ID, "u").clear()
+                self.driver.find_element(By.ID, "u").send_keys(account)
+                # 输入密码
+                self.driver.find_element(By.ID, "p").clear()
+                self.driver.find_element(By.ID, "p").send_keys(password)
+
+                logger.info(f"{name} 等待一会，确保登录键可以点击")
+                time.sleep(3)
+
+                # 发送登录请求
+                self.driver.find_element(By.ID, "login_button").click()
 
             # 尝试自动处理验证码
             self.try_auto_resolve_captcha()
@@ -515,7 +559,7 @@ class QQLogin:
             self.login_type_auto_login, login_action_fn=login_with_account_and_password, login_mode=login_mode
         )
 
-    def qr_login(self, login_mode="normal", name=""):
+    def qr_login(self, login_mode: str, name="", account=""):
         """
         二维码登录，并返回登陆后的cookie中包含的uin、skey数据
         :rtype: LoginResult
@@ -525,12 +569,15 @@ class QQLogin:
         self.window_title = f"请扫码 {name} - {login_mode}"
 
         def replace_qr_code_tip():
+            qr_js_wait_time = 1
+
             try:
+                # 扫码登录
                 tip_class_name = "qr_safe_tips"
                 tip = f"请扫码 {name}"
 
-                logger.info(color("bold_green") + f"准备修改二维码上方提示文字为 {tip}")
-                WebDriverWait(self.driver, self.cfg.login.open_url_wait_time).until(
+                logger.info(color("bold_green") + f"准备修改二维码上方 扫码提示文字 为 {tip}")
+                WebDriverWait(self.driver, qr_js_wait_time).until(
                     expected_conditions.visibility_of_element_located((By.CLASS_NAME, tip_class_name))
                 )
                 self.driver.execute_script(
@@ -540,12 +587,104 @@ class QQLogin:
                 logger.warning("替换扫码提示文字出错了（不影响登录流程）")
                 logger.debug("", exc_info=e)
 
+            try:
+                # 提示点击头像登录
+                tip_id = "qlogin_tips"
+                tip = f"请点击头像授权登录 {name} - 多余两个账号可以点击两侧箭头切换"
+
+                logger.info(color("bold_green") + f"准备修改二维码上方 点击头像提示文字 为 {tip}")
+                WebDriverWait(self.driver, qr_js_wait_time).until(
+                    expected_conditions.visibility_of_element_located((By.ID, tip_id))
+                )
+                self.driver.execute_script(f"document.getElementById('{tip_id}').innerText = '{tip}'; ")
+            except Exception as e:
+                logger.warning("替换扫码提示文字出错了（不影响登录流程）")
+                logger.debug("", exc_info=e)
+
+            try:
+                # 调整箭头
+                logger.info(color("bold_green") + "准备修改两侧箭头为可见的 ⬅️和 ➡️")
+                self.driver.execute_script(
+                    """
+                    function setArrow(elementId = "", arrow="") {
+                        let target = document.getElementById(elementId)
+
+                        // 需要修改 display 为 block 才能获取高度
+                        let oldDisplay = target.style.display
+                        target.style.display = "block"
+                        let desiredHeight = parseInt((target.clientHeight || 120) * 1.5)
+                        target.style.display = oldDisplay
+
+                        // 修改为位于头像左右的箭头
+                        target.innerText = arrow
+                        target.style.lineHeight = desiredHeight + "px"
+                    }
+
+                    setArrow("prePage", "⬅️")
+                    setArrow("nextPage", "➡️")
+                    """
+                )
+            except Exception as e:
+                logger.warning("修改箭头失败了（不影响登录流程）")
+                logger.debug("", exc_info=e)
+
         def login_with_qr_code():
             logger.info(color("bold_yellow") + f"请在{self.get_login_timeout(True)}s内完成扫码登录操作或快捷登录操作")
 
             replace_qr_code_tip()
 
+            logger.info(color("bold_green") + "尝试自动点击头像进行登录")
+            self.try_auto_click_avatar(account, name, self.login_type_qr_login)
+
         return self._login(self.login_type_qr_login, login_action_fn=login_with_qr_code, login_mode=login_mode)
+
+    def try_auto_click_avatar(self, account: str, name: str, login_type: str) -> bool:
+        # 检测功能开关
+        if login_type == self.login_type_auto_login:
+            enable = self.cfg.login.enable_auto_click_avatar_in_auto_login
+        else:
+            enable = self.cfg.login.enable_auto_click_avatar_in_qr_login
+
+        if not enable:
+            logger.warning(f"当前未开启【{login_type} 模式下尝试点击头像来登录】，请自行操作~。若需要该功能，可在配置工具【公共配置/登录】中开启本功能")
+            return False
+
+        logger.info(f"当前已开启【{login_type} 模式下尝试点击头像来登录】。如该功能有异常，导致登录流程无法正常进行，可在配置工具【公共配置/登录】中关闭本功能")
+
+        # 实际登录流程
+        login_success = False
+
+        ctx = f"【{name}({account})】"
+
+        try:
+            # 尝试自动点击头像登录
+            if account != "":
+                selector = f"#qlogin_list > a[uin='{account}']"
+
+                logger.info(color("bold_green") + f"{ctx} 尝试点击头像来登录")
+
+                logger.info("检查对应头像是否存在")
+                time.sleep(1)
+                self.driver.find_element(By.CSS_SELECTOR, selector)
+
+                logger.info("开始点击对应头像")
+                self.driver.execute_script(
+                    f"""
+                    document.querySelector("{selector}").click()
+                    """
+                )
+
+                time.sleep(1)
+                login_success = not self.driver.find_elements(By.ID, "switcher_plogin")
+                logger.info(color("bold_green") + f"{ctx} 点击头像登录的结果为: {'成功' if login_success else '失败'}")
+            elif login_type == self.login_type_qr_login:
+                async_message_box("现已支持扫码模式下自动点击头像进行登录，不过需要填写QQ号码，可使用配置工具填写QQ号码即可体验本功能", "扫码自动点击头像功能提示", show_once=True)
+
+        except Exception as e:
+            logger.warning(f"{ctx} 尝试自动点击头像登录失败了，请自行操作~")
+            logger.debug("", exc_info=e)
+
+        return login_success
 
     def _login(self, login_type, login_action_fn=None, login_mode="normal"):
         if not is_first_run_in(f"login_locker_{login_mode}_{self.name}", duration=datetime.timedelta(seconds=10)):
@@ -556,7 +695,13 @@ class QQLogin:
             login_retry_key, self.cfg.login.max_retry_count - 1, self.cfg.login.retry_wait_time
         )
 
-        for idx in range_from_one(self.cfg.login.max_retry_count):
+        self.login_slow_retry_max_count = self.cfg.login.max_retry_count
+        for idx in range_from_one(self.login_slow_retry_max_count):
+            self.login_slow_retry_index = idx
+            logger.info(
+                color("bold_green") + f"[慢速重试阶段] [{idx}/{self.login_slow_retry_max_count}] {self.name} 开始本轮登录流程"
+            )
+
             self.login_mode = login_mode
 
             # note: 如果get_login_url的surl变更，代码中确认登录完成的地方也要一起改
@@ -617,30 +762,39 @@ class QQLogin:
                 if login_exception is not None:
                     login_result = color("bold_cyan") + "登录失败"
 
+                current_url = ""
+                if self.driver is not None:
+                    current_url = self.driver.current_url
+
                 used_time = datetime.datetime.now() - self.time_start_login
                 logger.info("")
                 logger.info(
                     f"[{login_result}] "
                     + color("bold_yellow")
-                    + f"{self.name} 第{idx}/{self.cfg.login.max_retry_count}次 {ctx} 共耗时为 {used_time}"
+                    + f"{self.name} [慢速重试阶段] 第{idx}/{self.login_slow_retry_max_count}次 {ctx} 共耗时为 {used_time}"
                 )
                 logger.info("")
                 self.destroy_chrome()
 
                 if login_exception is not None:
                     # 登陆失败
-                    lc = self.cfg.login
-
-                    msg = f"{self.name} 第{idx}/{lc.max_retry_count}次尝试登录出错"
-                    if idx < lc.max_retry_count:
+                    msg = (
+                        f"[慢速重试阶段] {self.name} 第{self.login_slow_retry_index}/{self.login_slow_retry_max_count}次尝试登录出错"
+                    )
+                    if idx < self.login_slow_retry_max_count:
                         # 每次等待时长线性递增
                         wait_time = retry_timeouts[idx - 1]
-                        msg += f"，等待{wait_time}秒后重试(v{now_version})"
+                        msg += f"将等待较长一段时间后再重试，也就是 {wait_time:.2f}秒后重试(v{now_version} {ver_time})"
                         msg += f"\n\t当前登录重试等待时间序列：{retry_timeouts}"
                         msg += f"\n\t根据历史数据得出的推荐重试等待时间：{login_retry_data.recommended_first_retry_timeout}"
                         if use_by_myself():
                             msg += f"\n\t(仅我可见)历史重试成功等待时间列表：{login_retry_data.history_success_timeouts}"
+                        msg += f"\n\t当前网址为 {current_url}"
                         logger.exception(msg, exc_info=login_exception)
+                        if type(login_exception) is RequireVerifyMessageButInHeadlessMode:
+                            logger.info(color("bold_yellow") + "检测到需要验证手机，将立即开始第二次慢速重试，且显示浏览器界面")
+                            wait_time = 1
+
                         count_down(f"{truncate(self.name, 20):20s} 重试", wait_time)
                     else:
                         logger.exception(msg, exc_info=login_exception)
@@ -695,7 +849,7 @@ class QQLogin:
         def assert_login_finished_fn():
             logger.info(f"{self.name} 请等待网页切换为目标网页，则说明已经登录完成了，最大等待时长为{self.cfg.login.login_finished_timeout}")
             WebDriverWait(self.driver, self.cfg.login.login_finished_timeout).until(
-                expected_conditions.url_to_be(s_url)
+                expected_conditions.url_contains(s_url)
             )
 
         self._login_common(login_type, switch_to_login_frame_fn, assert_login_finished_fn, login_action_fn)
@@ -723,7 +877,7 @@ class QQLogin:
         def assert_login_finished_fn():
             logger.info(f"{self.name} 请等待网页切换为目标网页，则说明已经登录完成了，最大等待时长为{self.cfg.login.login_finished_timeout}")
             WebDriverWait(self.driver, self.cfg.login.login_finished_timeout).until(
-                expected_conditions.url_to_be(s_url)
+                expected_conditions.url_contains(s_url)
             )
 
         self._login_common(login_type, switch_to_login_frame_fn, assert_login_finished_fn, login_action_fn)
@@ -751,7 +905,7 @@ class QQLogin:
         def assert_login_finished_fn():
             logger.info(f"{self.name} 请等待网页切换为目标网页，则说明已经登录完成了，最大等待时长为{self.cfg.login.login_finished_timeout}")
             WebDriverWait(self.driver, self.cfg.login.login_finished_timeout).until(
-                expected_conditions.url_to_be(s_url)
+                expected_conditions.url_contains(s_url)
             )
 
         self._login_common(login_type, switch_to_login_frame_fn, assert_login_finished_fn, login_action_fn)
@@ -776,6 +930,22 @@ class QQLogin:
 
             self.set_window_size()
             try:
+                logger.info("尝试处理可能有的每日签到弹窗")
+                xpath_close_daily_sign = "//i[contains(@class, 'athena-dialog-close-icon')]"
+                WebDriverWait(self.driver, self.cfg.login.open_url_wait_time).until(
+                    expected_conditions.element_to_be_clickable((By.XPATH, xpath_close_daily_sign))
+                )
+
+                logger.info("等待3秒，确保加载完成")
+                time.sleep(3)
+
+                logger.info("点击关闭每日签到弹窗")
+                self.driver.find_element(By.XPATH, xpath_close_daily_sign).click()
+                time.sleep(3)
+            except Exception:
+                logger.warning("爱玩处理 关闭签到弹窗 流程失败了，可能是本次没有弹窗")
+
+            try:
                 logger.info("等待登录按钮出来，确保加载完成")
                 xpath_login = "//div[contains(text(), '点击登录')]"
                 WebDriverWait(self.driver, self.cfg.login.load_page_timeout).until(
@@ -792,8 +962,11 @@ class QQLogin:
                 logger.warning("爱玩处理 点击登录按钮 流程失败了，可能是已经处理成功了")
 
             try:
+                logger.info("勾选同意协议")
                 self.driver.find_element(By.CLASS_NAME, "js-check-input").click()
                 time.sleep(2)
+
+                logger.info("点击使用QQ登录")
                 self.driver.find_element(By.CLASS_NAME, "iwanLogin_qq").click()
             except Exception:
                 logger.warning("爱玩处理 中间同意协议 流程失败了，可能是已经处理成功了")
@@ -903,7 +1076,7 @@ class QQLogin:
         def assert_login_finished_fn():
             logger.info(f"{self.name} 请等待网页切换为目标网页，则说明已经登录完成了，最大等待时长为{self.cfg.login.login_finished_timeout}")
             WebDriverWait(self.driver, self.cfg.login.login_finished_timeout).until(
-                expected_conditions.url_to_be(s_url)
+                expected_conditions.url_contains(s_url)
             )
 
         self._login_common(login_type, switch_to_login_frame_fn, assert_login_finished_fn, login_action_fn)
@@ -1015,32 +1188,35 @@ class QQLogin:
         # 实际登录的逻辑，不同方式的处理不同，这里调用外部传入的函数
         logger.info(f"{self.name} 开始{login_type}流程")
 
-        max_try = 10
+        # 当登录出错时，默认快速重试该次数，避免网络状况等造成的偶然登录失败
+        quick_retry_max_count = 3
+        quick_retry_wait_seconds = 2
 
         is_qr_login = self.login_type_qr_login in login_type
 
         short_login_retry_key = "short_login_retry_key"
         login_retry_data, retry_timeouts = self.get_retry_data(
-            short_login_retry_key, max_try, self.get_login_timeout(is_qr_login)
+            short_login_retry_key, quick_retry_max_count, self.get_login_timeout(is_qr_login)
         )
         if is_qr_login:
             # 如果是扫码登录，则每次都等待固定时长
             retry_timeouts = [self.get_login_timeout(True) for v in retry_timeouts]
 
-        for idx in range_from_one(max_try):
+        for idx in range_from_one(quick_retry_max_count):
             try:
                 logger.info(color("bold_green") + f"设置标题框为 {self.window_title}")
                 self.driver.execute_script(f"document.title = '{self.window_title}';")
 
                 switch_to_login_frame_fn()
 
-                logger.info(f"[{idx}/{max_try}] {self.name} 尝试进行登陆")
+                logger.info(color("bold_green") + f"[快速重试阶段] [{idx}/{quick_retry_max_count}] {self.name} 尝试进行登陆")
                 if login_action_fn is not None:
                     login_action_fn()
 
                 wait_time = retry_timeouts[idx - 1]
                 logger.info(
-                    f"[{idx}/{max_try}] {self.name} 尝试等待登录按钮消失~ 最大等待 {wait_time} 秒, retry_timeouts={retry_timeouts}"
+                    color("bold_green")
+                    + f"[快速重试阶段] [{idx}/{quick_retry_max_count}] {self.name} 尝试等待登录按钮消失~ 最大等待 {wait_time} 秒, retry_timeouts={retry_timeouts}"
                 )
                 try:
                     WebDriverWait(self.driver, wait_time).until(
@@ -1048,6 +1224,24 @@ class QQLogin:
                     )
                 except NoSuchWindowException:
                     logger.debug("这种情况好像不影响登录，可以无视")
+                except BaseException as e:
+                    # 判断是否出现了【手机号码验证】，若是，则把等待时间调长
+                    try:
+                        self.driver.find_element(By.ID, "verify_iframe_mask")
+
+                        verify_max_wait_time = 600
+                        logger.warning(color("bold_yellow") + f"{self.name} 需要进行手机号码验证，将最多等待 {verify_max_wait_time} 秒")
+                        if self.cfg.run_in_headless_mode and self.login_slow_retry_index == 1:
+                            raise RequireVerifyMessageButInHeadlessMode()
+
+                        WebDriverWait(self.driver, verify_max_wait_time).until(
+                            expected_conditions.invisibility_of_element_located((By.ID, "verify_iframe_mask"))
+                        )
+                    except RequireVerifyMessageButInHeadlessMode as verify_exception:
+                        raise verify_exception
+                    except Exception:
+                        # 如果没有手机验证，则按原样抛出异常
+                        raise e
 
                 if idx > 1:
                     # 第idx-1次的重试成功了，尝试更新历史数据
@@ -1057,10 +1251,16 @@ class QQLogin:
                         self.cfg.login.recommended_retry_wait_time_change_rate,
                         self.name,
                     )
+
                 break
+            except RequireVerifyMessageButInHeadlessMode as verify_exception:
+                raise verify_exception
             except Exception as e:
+                login_mode_name = self.login_mode_to_description[self.login_mode]
+
                 logger.error(
-                    f"[{idx}/{max_try}] {self.name} 出错了，等待两秒再重试登陆。\n"
+                    f"[快速重试阶段] [{idx}/{quick_retry_max_count}] {self.name} {login_type} 出错了。（此时慢速重试阶段为[{self.login_slow_retry_index}/{self.login_slow_retry_max_count}]）\n"
+                    f"为避免偶然因素，前{quick_retry_max_count}次出错将采用快速重试策略，也就是等待{quick_retry_wait_seconds}秒后立刻重试登陆。\n"
                     + color("bold_yellow")
                     + (
                         "也许是短期内登陆太多账号显示登录环境异常/网络有问题/出现短信验证码/账号密码不匹配导致。\n"
@@ -1074,17 +1274,22 @@ class QQLogin:
                     )
                     + "\n"
                     + color("bold_cyan")
-                    + "如果之前版本都是正常的，可以试试切换旧版本chrome - 配置工具/公共配置/登录/强制使用特定大版本chrome，修改为94或者更早的版本，并开启 强制使用便携版 开关\n",
+                    + "如果之前版本都是正常的，可以试试切换旧版本chrome - 配置工具/公共配置/登录/强制使用特定大版本chrome，修改为94或者更早的版本，并开启 强制使用便携版 开关\n"
+                    + "\n"
+                    + color("bold_green")
+                    + f"如果一直卡在 {login_mode_name} 登录流程，可能是你网络没法登录这个，或者是该登陆类型的服务器抽风了（经常出现），建议多试几次。\n"
+                    + f"真不行就去配置工具打开 【当前账号配置/活动开关/登陆类型开关/禁用 {login_mode_name} 登录】 开关，从而跳过 {login_mode_name} 类型的登录\n"
+                    + "",
                     exc_info=e,
                 )
 
-                if "电脑管家" in login_type:
+                if self.login_mode == self.login_mode_guanjia:
                     logger.warning(
                         color("bold_green") + "如果一直卡在管家登录流程，可能是你网络没法登录这个，建议多试几次，真不行就去配置工具关闭 管家 活动 的开关（不是关闭这个登录页面）~"
                     )
                     logger.info("电脑管家 模式不尝试短时间重试，直接等待下次重试")
                     break
-                if "iwan" in login_type:
+                if self.login_mode == self.login_mode_iwan:
                     logger.warning(
                         color("bold_green")
                         + "如果一直卡在 iwan 登录流程，可能是你网络没法登录这个，建议多试几次，真不行就去配置工具关闭 qq视频 活动 的开关（不是关闭这个登录页面）~"
@@ -1092,12 +1297,18 @@ class QQLogin:
                     logger.info("iwan 模式不尝试短时间重试，直接等待下次重试")
                     break
 
-                if idx < max_try:
-                    time.sleep(2)
+                logger.info(f"为避免本次异常是在登录完成后发生的，也就是此时页面已经不是登录页面了，导致后续登录尝试一直失败，这里主动重新打开登录页面: {self.login_url}")
+                self.driver.get(self.login_url)
+
+                if idx < quick_retry_max_count:
+                    time.sleep(quick_retry_wait_seconds)
+                else:
+                    raise Exception("快速重试最大上限后仍失败了")
 
         logger.info(f"{self.name} 回到主iframe")
         self.driver.switch_to.default_content()
 
+        logger.info(f"{self.name} 当前网址为 {self.driver.current_url}")
         assert_login_finished_fn()
 
         logger.info(f"{self.name} 登录完成")
@@ -1231,7 +1442,7 @@ class QQLogin:
         try:
             self._try_auto_resolve_captcha()
         except Exception as e:
-            msg = f"ver {now_version} {self.name} 自动处理验证失败了，出现未捕获的异常，请加群{config().common.qq_group}反馈或自行解决。请手动进行处理验证码"
+            msg = f"ver {now_version} {ver_time} {self.name} 自动处理验证失败了，出现未捕获的异常，请加群{config().common.qq_group}反馈或自行解决。请手动进行处理验证码"
             logger.exception(color("fg_bold_red") + msg, exc_info=e)
             logger.warning(color("fg_bold_cyan") + "如果稳定报错，不妨打开网盘，看看是否有新版本修复了这个问题~")
             logger.warning(color("fg_bold_cyan") + f"链接：{config().common.netdisk_link}")
@@ -1407,7 +1618,7 @@ def test():
     # 需要运行的测试维度：账号、登录类别、登录模式
     login_accounts = [cfg.account_configs[idx - 1] for idx in [1]]
     login_types = [QQLogin.login_type_auto_login]
-    login_modes = [QQLogin.login_mode_normal]
+    login_modes = [QQLogin.login_mode_qzone]
 
     if TEST_SWITCH_TEST_ALL_ACCOUNTS:
         login_accounts = [account for account in cfg.account_configs]
@@ -1467,9 +1678,9 @@ def do_login(
     ql = QQLogin(common_cfg, window_index=window_index)
 
     if login_type == ql.login_type_auto_login:
-        lr = ql.login(acc.account, acc.password, login_mode=login_mode, name=account.name)
+        lr = ql.login(acc.account, acc.password, login_mode, name=account.name)
     else:
-        lr = ql.qr_login(login_mode=login_mode, name=account.name)
+        lr = ql.qr_login(login_mode, name=account.name, account=acc.account)
 
     logger.info(
         color("bold_green")

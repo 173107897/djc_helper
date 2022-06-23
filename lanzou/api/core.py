@@ -24,6 +24,10 @@ from lanzou.api.utils import *
 __all__ = ['LanZouCloud']
 
 
+class NotFoundError(IOError):
+    """404"""
+
+
 class LanZouCloud(object):
     FAILED = -1
     SUCCESS = 0
@@ -68,30 +72,68 @@ class LanZouCloud(object):
         #   1. 将 _host_url 的域名改为新的
         #   2. 把 最新的域名，比如 lanzouo 加到可能的域名列表的最前面
         #   3. 如果下面的域名有部分不再出现在备案信息中了，可以直接注释或者移除
-        self._host_url = 'https://pan.lanzoup.com'
-        self.available_domains = [
+        # 根据最近一次检测的结果，将下列域名分为以下三类
+        # 可以快速访问的
+        quick_domain_list = [
+            'lanzouu.com',  # 2021-01-17 鲁ICP备15001327号-21
+            'lanzouh.com',  # 2021-01-17 鲁ICP备15001327号-20
+
             'lanzoup.com',  # 2021-12-10 鲁ICP备15001327号-16
             'lanzout.com',  # 2021-12-10 鲁ICP备15001327号-15
             'lanzouy.com',  # 2021-12-10 鲁ICP备15001327号-14
             'lanzoul.com',  # 2021-12-10 鲁ICP备15001327号-13
-            'lanzoug.com',  # 2021-12-10 鲁ICP备15001327号-12
             'lanzouv.com',  # 2021-12-10 鲁ICP备15001327号-11
+
             'lanzouj.com',  # 2021-12-10 鲁ICP备15001327号-10
             'lanzouq.com',  # 2021-12-10 鲁ICP备15001327号-9
-            'lanzouo.com',  # 2021-09-15 鲁ICP备15001327号-8
+
             'lanzouw.com',  # 2021-09-02 鲁ICP备15001327号-7
             'lanzoui.com',  # 2020-06-09 鲁ICP备15001327号-6
             'lanzoux.com',  # 2020-06-09 鲁ICP备15001327号-5
         ]
+
+        # 访问速度比较慢
+        slow_domain_list = [
+            'lanzoum.com',  # 2021-01-17 鲁ICP备15001327号-19
+            'lanzouf.com',  # 2021-01-17 鲁ICP备15001327号-18
+            'lanzoub.com',  # 2021-01-17 鲁ICP备15001327号-17
+        ]
+
+        # 不可访问
+        unavailable_domain_list = [
+            'lanzoug.com',  # 2021-12-10 鲁ICP备15001327号-12
+            'lanzouo.com',  # 2021-09-15 鲁ICP备15001327号-8
+        ]
+
+        shuffle(quick_domain_list)
+        shuffle(slow_domain_list)
+        shuffle(unavailable_domain_list)
+
+        self.available_domains = [
+            *quick_domain_list,
+            *slow_domain_list,
+
+            # *unavailable_domain_list,
+        ]
+
+        # 默认链接使用最新的域名
+        latest_domain = self.available_domains[0]
+        self._host_url = re.sub(r'lanzou\w\.com', latest_domain, 'https://pan.lanzoup.com')
 
     def _get(self, url, **kwargs):
         for possible_url in self._all_possible_urls(url):
             try:
                 kwargs.setdefault('timeout', self._timeout)
                 kwargs.setdefault('headers', self._headers)
-                return self._session.get(possible_url, verify=False, **kwargs)
-            except (ConnectionError, requests.RequestException):
-                logger.debug(f"Get {possible_url} failed, try another domain")
+                res = self._session.get(possible_url, verify=False, **kwargs)
+
+                if res.status_code == 404:
+                    # 当前域名404的话，抛出异常，从而尝试下一个域名
+                    raise NotFoundError()
+
+                return res
+            except (ConnectionError, requests.RequestException, NotFoundError) as e:
+                logger.debug(f"Get {possible_url} failed, try another domain, err={e}")
 
         return None
 
@@ -100,9 +142,15 @@ class LanZouCloud(object):
             try:
                 kwargs.setdefault('timeout', self._timeout)
                 kwargs.setdefault('headers', self._headers)
-                return self._session.post(possible_url, data, verify=False, **kwargs)
-            except (ConnectionError, requests.RequestException):
-                logger.debug(f"Post to {possible_url} ({data}) failed, try another domain")
+                res = self._session.post(possible_url, data, verify=False, **kwargs)
+
+                if res.status_code == 404:
+                    # 当前域名404的话，抛出异常，从而尝试下一个域名
+                    raise NotFoundError()
+
+                return res
+            except (ConnectionError, requests.RequestException, NotFoundError) as e:
+                logger.debug(f"Post to {possible_url} ({data}) failed, try another domain, err={e}")
 
         return None
 
@@ -544,6 +592,14 @@ class LanZouCloud(object):
             if len(sign) < 20:  # 此时 sign 保存在变量里面, 变量名是 sign 匹配的字符
                 sign = re.search(rf"var {sign}\s*=\s*'(.+?)';", first_page).group(1)
             post_data = {'action': 'downprocess', 'sign': sign, 'ves': 1}
+            # 某些特殊情况 share_url 会出现 webpage 参数, post_data 需要更多参数
+            # https://github.com/zaxtyson/LanZouCloud-API/issues/74
+            if "?webpage=" in share_url:
+                ajax_data = re.search(r"var ajaxdata\s*=\s*'(.+?)';", first_page).group(1)
+                web_sign = re.search(r"var websign\s*=\s*'(.+?)';", first_page).group(1)
+                web_sign_key = re.search(r"var websignkey\s*=\s*'(.+?)';", first_page).group(1)
+                post_data = {'action': 'downprocess', 'signs': ajax_data, 'sign': sign, 'ves': 1,
+                             'websign': web_sign, 'websignkey': web_sign_key}
             link_info = self._post(self._host_url + '/ajaxm.php', post_data)
             if not link_info:
                 return FileDetail(LanZouCloud.NETWORK_ERROR, name=f_name, time=f_time, size=f_size, desc=f_desc,

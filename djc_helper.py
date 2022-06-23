@@ -28,8 +28,6 @@ from dao import (
     AmesvrUserBindInfo,
     BuyInfo,
     ColgBattlePassInfo,
-    CreateWorkInfo,
-    CreateWorkListInfo,
     DnfChronicleMatchServerAddUserRequest,
     DnfChronicleMatchServerCommonResponse,
     DnfChronicleMatchServerRequestUserRequest,
@@ -38,6 +36,7 @@ from dao import (
     DnfHeiyaInfo,
     DnfHelperChronicleBasicAwardInfo,
     DnfHelperChronicleBasicAwardList,
+    DnfHelperChronicleBindInfo,
     DnfHelperChronicleExchangeGiftInfo,
     DnfHelperChronicleExchangeList,
     DnfHelperChronicleLotteryList,
@@ -57,6 +56,8 @@ from dao import (
     MaJieLuoInfo,
     MobileGameGiftInfo,
     MoJieRenInfo,
+    MyHomeGift,
+    MyHomeGiftList,
     NewArkLotteryAgreeRequestCardResult,
     NewArkLotteryCardCountInfo,
     NewArkLotteryLotteryCountInfo,
@@ -67,6 +68,8 @@ from dao import (
     SailiyamWorkInfo,
     SpringFuDaiInfo,
     TemporaryChangeBindRoleInfo,
+    VoteEndWorkInfo,
+    VoteEndWorkList,
     XiaojiangyouInfo,
     XiaojiangyouPackageInfo,
     XinyueCatInfo,
@@ -96,11 +99,12 @@ from db import (
     WelfareDB,
 )
 from exceptions_def import (
+    ArkLotteryTargetQQSendByRequestReachMaxCount,
     DnfHelperChronicleTokenExpiredOrWrongException,
     GithubActionLoginException,
     SameAccountTryLoginAtMultipleThreadsException,
 )
-from first_run import is_daily_first_run, is_first_run, is_monthly_first_run, is_weekly_first_run
+from first_run import is_daily_first_run, is_first_run, is_monthly_first_run, is_weekly_first_run, reset_first_run
 from game_info import get_game_info, get_game_info_by_bizcode
 from log import color, logger
 from network import Network, extract_qq_video_message, jsonp_callback_flag
@@ -138,17 +142,18 @@ from util import (
     get_this_thursday_of_dnf,
     get_this_week_monday_datetime,
     get_today,
+    get_week,
     is_act_expired,
     json_compact,
     md5,
     message_box,
     now_after,
-    now_before,
     now_in_range,
     padLeftRight,
     parse_time,
     pause,
     pause_and_exit,
+    post_json_to_data,
     range_from_one,
     remove_suffix,
     show_end_time,
@@ -217,6 +222,10 @@ class DjcHelper:
         check_in_black_list(self.uin())
 
     def update_skey(self, query_data, window_index=1):
+        if self.cfg.function_switches.disable_login_mode_normal:
+            logger.warning("禁用了普通登录模式，将不会尝试更新skey")
+            return
+
         login_mode_dict: dict[str, Callable[[dict, int], None]] = {
             "by_hand": self.update_skey_by_hand,
             "qr_login": self.update_skey_qr_login,
@@ -260,13 +269,15 @@ class DjcHelper:
 
     def update_skey_qr_login(self, query_data, window_index=1):
         qqLogin = QQLogin(self.common_cfg, window_index=window_index)
-        loginResult = qqLogin.qr_login(name=self.cfg.name)
+        loginResult = qqLogin.qr_login(
+            QQLogin.login_mode_normal, name=self.cfg.name, account=self.cfg.account_info.account
+        )
         self.save_uin_skey(loginResult.uin, loginResult.skey, loginResult.vuserid)
 
     def update_skey_auto_login(self, query_data, window_index=1):
         qqLogin = QQLogin(self.common_cfg, window_index=window_index)
         ai = self.cfg.account_info
-        loginResult = qqLogin.login(ai.account, ai.password, name=self.cfg.name)
+        loginResult = qqLogin.login(ai.account, ai.password, QQLogin.login_mode_normal, name=self.cfg.name)
         self.save_uin_skey(loginResult.uin, loginResult.skey, loginResult.vuserid)
 
     def save_uin_skey(self, uin, skey, vuserid):
@@ -329,7 +340,7 @@ class DjcHelper:
         # 查询全部绑定角色信息
         res = self.get("获取道聚城各游戏的绑定角色列表", self.urls.query_bind_role_list, print_res=False)
         self.bizcode_2_bind_role_map = {}
-        for roleinfo_dict in res["data"]:
+        for roleinfo_dict in res.get("data", []):
             role_info = GameRoleInfo().auto_update_config(roleinfo_dict)
             self.bizcode_2_bind_role_map[role_info.sBizCode] = role_info
 
@@ -368,7 +379,7 @@ class DjcHelper:
         binded = True
         if self.cfg.function_switches.get_djc:
             # 检查道聚城是否已绑定dnf角色信息，若未绑定则警告（这里不停止运行是因为可以不配置领取dnf的道具）
-            if not self.cfg.cannot_bind_dnf and "dnf" not in self.bizcode_2_bind_role_map:
+            if not self.cfg.cannot_bind_dnf_v2 and "dnf" not in self.bizcode_2_bind_role_map:
                 logger.warning(color("fg_bold_yellow") + "未在道聚城绑定【地下城与勇士】的角色信息，请前往道聚城app进行绑定")
                 binded = False
 
@@ -560,44 +571,50 @@ class DjcHelper:
         # re: 更新新的活动时记得更新urls.py的not_ams_activities
         return [
             ("DNF助手编年史", self.dnf_helper_chronicle),
-            ("DNF漫画预约活动", self.dnf_comic),
-            ("hello语音（皮皮蟹）网页礼包兑换", self.hello_voice),
             ("DNF福利中心兑换", self.dnf_welfare),
-            ("dnf助手活动", self.dnf_helper),
+            ("DNF格斗大赛", self.dnf_pk),
+            ("冒险的起点", self.maoxian_start),
             ("DNF心悦", self.dnf_xinyue),
-            ("会员关怀", self.dnf_vip_mentor),
-            ("集卡", self.dnf_ark_lottery),
-            ("qq视频蚊子腿-爱玩", self.qq_video_iwan),
+            ("DNF互动站", self.dnf_interactive),
+            ("DNF闪光杯", self.dnf_shanguang),
+            ("DNF落地页活动", self.dnf_luodiye),
+            ("勇士的冒险补给", self.maoxian),
             ("colg每日签到", self.colg_signin),
-            ("dnf助手活动Dup", self.dnf_helper_dup),
-            ("DNF集合站", self.dnf_collection),
-            ("WeGame活动", self.dnf_wegame),
-            ("管家蚊子腿", self.guanjia_new),
+            ("DNF周年庆登录活动", self.dnf_anniversary),
+            ("DNF马杰洛的规划", self.majieluo),
             ("超级会员", self.dnf_super_vip),
             ("黄钻", self.dnf_yellow_diamond),
-            ("魔界人探险记", self.mojieren),
-            ("DNF马杰洛的规划", self.majieluo),
-            ("组队拜年", self.team_happy_new_year),
-            ("DNF落地页活动", self.dnf_luodiye),
+            ("我的小屋", self.dnf_my_home),
+            ("DNF集合站", self.dnf_collection),
+            ("WeGame活动", self.dnf_wegame),
+            ("集卡", self.dnf_ark_lottery),
+            ("KOL", self.dnf_kol),
+            ("qq视频蚊子腿-爱玩", self.qq_video_iwan),
         ]
 
     def expired_activities(self) -> list[tuple[str, Callable]]:
         return [
+            ("DNF共创投票", self.dnf_dianzan),
+            ("dnf助手活动Dup", self.dnf_helper_dup),
+            ("DNF漫画预约活动", self.dnf_comic),
+            ("dnf助手活动", self.dnf_helper),
+            ("翻牌活动", self.dnf_card_flip),
+            ("hello语音（皮皮蟹）网页礼包兑换", self.hello_voice),
+            ("管家蚊子腿", self.guanjia_new),
+            ("魔界人探险记", self.mojieren),
+            ("会员关怀", self.dnf_vip_mentor),
+            ("组队拜年", self.team_happy_new_year),
             ("新职业预约活动", self.dnf_reserve),
             ("DNF集合站_史诗之路", self.dnf_collection_dup),
             ("WeGame活动_新版", self.wegame_new),
             ("DNF娱乐赛", self.dnf_game),
             ("DNF公会活动", self.dnf_gonghui),
-            ("DNF闪光杯", self.dnf_shanguang),
             ("关怀活动", self.dnf_guanhuai),
             ("DNF记忆", self.dnf_memory),
             ("DNF预约", self.dnf_reservation),
             ("DNF名人堂", self.dnf_vote),
-            ("DNF共创投票", self.dnf_dianzan),
             ("qq视频蚊子腿", self.qq_video),
-            ("KOL", self.dnf_kol),
             ("WeGameDup", self.dnf_wegame_dup),
-            ("勇士的冒险补给", self.maoxian_dup),
             ("轻松之路", self.dnf_relax_road),
             ("命运的抉择挑战赛", self.dnf_mingyun_jueze),
             ("管家蚊子腿", self.guanjia_new_dup),
@@ -619,12 +636,10 @@ class DjcHelper:
             ("DNF强者之路", self.dnf_strong),
             ("管家蚊子腿", self.guanjia),
             ("DNF十三周年庆活动", self.dnf_13),
-            ("DNF周年庆登录活动", self.dnf_anniversary),
             ("DNF奥兹玛竞速", self.dnf_ozma),
             ("我的dnf13周年活动", self.dnf_my_story),
             ("集卡_旧版", self.ark_lottery),
             ("qq视频-AME活动", self.qq_video_amesvr),
-            ("勇士的冒险补给", self.maoxian),
             ("qq会员杯", self.dnf_club_vip),
         ]
 
@@ -1215,14 +1230,38 @@ class DjcHelper:
         :type op: XinYueOperationConfig
         """
         retryCfg = self.common_cfg.retry
-        # 最少等待5秒
-        wait_time = max(retryCfg.request_wait_time, 5)
-        for i in range(op.count):
-            ctx = f"6.2 心悦操作： {op.sFlowName}({i + 1}/{op.count})"
+        # 设置最少等待时间
+        wait_time = max(retryCfg.request_wait_time, 10)
+        retry_wait_time = max(retryCfg.retry_wait_time, 5)
+
+        progress = 0
+        while progress < op.count:
+            # 默认每次兑换一个
+            exchange_count = 1
+            if op.iFlowId == "821281":
+                # 821281    新版复活币*1(日限100)(需1点勇士币)
+                # 特殊处理复活币
+                remaining = op.count - progress
+                if 1 <= remaining < 5:
+                    exchange_count = 1
+                elif 5 <= remaining < 20:
+                    exchange_count = 5
+                else:
+                    exchange_count = 20
+            progress += exchange_count
+
+            ctx = f"6.2 心悦操作： {op.sFlowName}({progress}/{op.count}) 本次兑换 {exchange_count}个"
 
             for _try_index in range(retryCfg.max_retry_count):
-                res = self.xinyue_battle_ground_op(ctx, op.iFlowId, package_id=op.package_id, lqlevel=xytype, dhnums=1)
+                res = self.xinyue_battle_ground_op(
+                    ctx, op.iFlowId, package_id=op.package_id, lqlevel=xytype, dhnums=exchange_count
+                )
                 if op.count > 1:
+                    if res["ret"] == "700" and "操作过于频繁" in res["flowRet"]["sMsg"]:
+                        logger.warning(f"心悦操作 {op.sFlowName} 操作过快，可能是由于其他并行运行的心悦活动请求过多而引起，等待{retry_wait_time}s后重试")
+                        time.sleep(retry_wait_time)
+                        continue
+
                     if res["ret"] != "0" or res["modRet"]["iRet"] != 0:
                         logger.warning(f"{ctx} 出错了，停止尝试剩余次数")
                         return
@@ -1362,11 +1401,14 @@ class DjcHelper:
         return take_count
 
     def query_last_week_xinyue_team_awards(self) -> list[XinYueTeamAwardInfo]:
+        # 假设过去两周每天兑换40个道具（比如装备提升礼盒），每页为4个
+        two_week_max_page = 40 * 7 * 2 // 4
+
         last_monday = get_last_week_monday_datetime()
         this_monday = get_this_week_monday_datetime()
 
         last_week_awards = []
-        for page in range_from_one(20):
+        for page in range_from_one(two_week_max_page):
             awards = self.query_xinyue_team_awards(page)
             if len(awards) == 0:
                 break
@@ -1774,10 +1816,11 @@ class DjcHelper:
 
         while True:
             res = self.get("领取每月黑钻等级礼包", self.urls.heizuan_gift)
-            # 如果未绑定大区，提示前往绑定 "iRet": -50014, "sMsg": "抱歉，请先绑定大区后再试！"
-            if res["iRet"] == -50014:
-                self.guide_to_bind_account("每月黑钻等级礼包", get_act_url("黑钻礼包"), activity_op_func=None)
-                continue
+            # note: 黑钻的活动页面不见了，现在没法手动绑定了，不再增加这个提示
+            # # 如果未绑定大区，提示前往绑定 "iRet": -50014, "sMsg": "抱歉，请先绑定大区后再试！"
+            # if res["iRet"] == -50014:
+            #     self.guide_to_bind_account("每月黑钻等级礼包", get_act_url("黑钻礼包"), activity_op_func=None)
+            #     continue
 
             return res
 
@@ -1880,8 +1923,8 @@ class DjcHelper:
             logger.warning("未启用领取QQ空间相关的功能，将跳过尝试更新QQ空间的p_skey的流程")
             return
 
-        if self.cfg.function_switches.disable_qzone_pskey_activities:
-            logger.warning("已禁用QQ空间pskey系列活动，将跳过尝试更新流程")
+        if self.cfg.function_switches.disable_login_mode_qzone:
+            logger.warning("已禁用QQ空间登录模式，将跳过尝试更新p_skey流程")
             return
 
         # 仅支持扫码登录和自动登录
@@ -1905,13 +1948,13 @@ class DjcHelper:
             try:
                 if self.cfg.login_mode == "qr_login":
                     # 扫码登录
-                    lr = ql.qr_login(login_mode=ql.login_mode_qzone, name=self.cfg.name)
+                    lr = ql.qr_login(ql.login_mode_qzone, name=self.cfg.name, account=self.cfg.account_info.account)
                 else:
                     # 自动登录
                     lr = ql.login(
                         self.cfg.account_info.account,
                         self.cfg.account_info.password,
-                        login_mode=ql.login_mode_qzone,
+                        ql.login_mode_qzone,
                         name=self.cfg.name,
                     )
             except GithubActionLoginException:
@@ -2077,7 +2120,7 @@ class DjcHelper:
         if self.lr is None:
             return
 
-        lucky_act_id = "37374_d54f84df"
+        lucky_act_id = "66551_3dae8177"
         self.qzone_act_op("幸运勇士礼包 - 当前角色", lucky_act_id)
         self.qzone_act_op(
             "幸运勇士礼包 - 集卡幸运角色",
@@ -2086,20 +2129,20 @@ class DjcHelper:
                 "集卡", self.cfg.ark_lottery.lucky_dnf_server_id, self.cfg.ark_lottery.lucky_dnf_role_id
             ),
         )
-        self.qzone_act_op("勇士见面礼", "37375_1782b367")
+        self.qzone_act_op("勇士见面礼", "66552_521b4320")
         if not self.cfg.function_switches.disable_share and is_first_run(
             f"dnf_super_vip_{get_act_url('超级会员')}_分享_{self.uin()}"
         ):
             self.qzone_act_op(
                 "分享给自己",
-                "37376_eec7c932",
+                "66553_778d6b88",
                 act_req_data={
                     "receivers": [
                         self.qq(),
                     ]
                 },
             )
-        self.qzone_act_op("分享领取礼包", "37377_89fa9ef3")
+        self.qzone_act_op("分享领取礼包", "66554_ddb83bef")
 
     # --------------------------------------------QQ空间黄钻--------------------------------------------
     # note: 适配流程如下
@@ -2127,7 +2170,7 @@ class DjcHelper:
         if self.lr is None:
             return
 
-        lucky_act_id = "37313_ae768ddf"
+        lucky_act_id = "66613_2fd7e98b"
         self.qzone_act_op("幸运勇士礼包 - 当前角色", lucky_act_id)
         self.qzone_act_op(
             "幸运勇士礼包 - 集卡幸运角色",
@@ -2136,20 +2179,20 @@ class DjcHelper:
                 "集卡", self.cfg.ark_lottery.lucky_dnf_server_id, self.cfg.ark_lottery.lucky_dnf_role_id
             ),
         )
-        self.qzone_act_op("勇士见面礼", "37314_5c4b5cec")
+        self.qzone_act_op("勇士见面礼", "66614_23246ef1")
         if not self.cfg.function_switches.disable_share and is_first_run(
             f"dnf_yellow_diamond_{get_act_url('黄钻')}_分享_{self.uin()}"
         ):
             self.qzone_act_op(
                 "分享给自己",
-                "37315_d10cc950",
+                "66615_9132410d",
                 act_req_data={
                     "receivers": [
                         self.qq(),
                     ]
                 },
             )
-        self.qzone_act_op("分享领取礼包", "37316_4aa84e62")
+        self.qzone_act_op("分享领取礼包", "66616_44f492ad")
 
     # --------------------------------------------QQ空间 新版回归关怀--------------------------------------------
     # note：对接流程与上方黄钻完全一致，参照其流程即可
@@ -2196,18 +2239,18 @@ class DjcHelper:
     # note: 需要先在 https://act.qzone.qq.com/ 中选一个活动登陆后，再用浏览器抓包
 
     # note: 以下几个页面右键点击对应按钮即可，与上方黄钻完全一致，参照其流程即可
-    ark_lottery_sub_act_id_login = "36951_99c1da65"  # 增加抽卡次数-每日登陆游戏
-    ark_lottery_sub_act_id_share = "36947_63bb0067"  # 增加抽卡次数-每日活动分享
-    ark_lottery_sub_act_id_lucky = "36948_d4dff83e"  # 增加抽卡次数-幸运勇士
-    ark_lottery_sub_act_id_draw_card = "36949_7bdfd29d"  # 抽卡
-    ark_lottery_sub_act_id_award_1 = "36952_59acb676"  # 领取奖励-第一排
-    ark_lottery_sub_act_id_award_2 = "36950_bd6363d6"  # 领取奖励-第二排
-    ark_lottery_sub_act_id_award_3 = "36955_90ad8151"  # 领取奖励-第三排
-    ark_lottery_sub_act_id_award_all = "36954_3c6aad3b"  # 领取奖励-十二张
-    ark_lottery_sub_act_id_lottery = "36953_a619e74a"  # 消耗卡片来抽奖
+    ark_lottery_sub_act_id_login = "68215_583ecab9"  # 增加抽卡次数-每日登陆游戏
+    ark_lottery_sub_act_id_share = "68209_34366a1a"  # 增加抽卡次数-每日活动分享
+    ark_lottery_sub_act_id_lucky = "68210_3d33acf6"  # 增加抽卡次数-幸运勇士
+    ark_lottery_sub_act_id_draw_card = "68211_e82e57f9"  # 抽卡
+    ark_lottery_sub_act_id_award_1 = "68212_eed42115"  # 领取奖励-第一排
+    ark_lottery_sub_act_id_award_2 = "68213_8d762de2"  # 领取奖励-第二排
+    ark_lottery_sub_act_id_award_3 = "68214_cf2fef8a"  # 领取奖励-第三排
+    ark_lottery_sub_act_id_award_all = "68217_07dffdf5"  # 领取奖励-十二张
+    ark_lottery_sub_act_id_lottery = "68216_e07571b5"  # 消耗卡片来抽奖
 
     # note: 清空抓包数据，按f5刷新后，搜索  QueryItems  (hack: 其实就是活动链接的 最后一部分)
-    ark_lottery_packet_id_card = "20545_145ba002"  # 查询当前卡片数目
+    ark_lottery_packet_id_card = "42163_27b8ff61"  # 查询当前卡片数目
 
     # note: xxx. 修改 urls.py 中的 pesudo_ark_lottery_act_id ，将其加一即可
 
@@ -2360,7 +2403,6 @@ class DjcHelper:
 
         return res.is_ok()
 
-    @try_except(return_val_on_except=False)
     def dnf_ark_lottery_send_card_by_request(
         self, card_id: str, target_djc_helper: DjcHelper, card_count: int = 1
     ) -> bool:
@@ -2434,7 +2476,13 @@ class DjcHelper:
 
         # {"code":0,"message":"succ","data":{}}
         # {"code":0,"message":"succ","data":{"code":999,"message":"数量不足，不能进行赠送，索要"}}
+        # {"code": 0, "message": "succ", "data": {"code": 999, "message": "用户1054073896已达到每日可被赠送上限"}}
+        # {"code": 0, "message": "succ", "data": {"code": 999, "message": "用户1054073896已达到活动可被赠送上限"}}
         res = NewArkLotteryAgreeRequestCardResult().auto_update_config(raw_res)
+
+        # 特殊处理目标QQ被赠送次数达到上限的情况，方便外面停止该流程
+        if res.data.message in [f"用户{target_qq}已达到每日可被赠送上限", f"用户{target_qq}已达到活动可被赠送上限"]:
+            raise ArkLotteryTargetQQSendByRequestReachMaxCount(res.data.message)
 
         return res.is_ok()
 
@@ -3218,101 +3266,51 @@ class DjcHelper:
 
         def check_in():
             today = get_today()
-            last_day = get_today(get_now() - datetime.timedelta(days=1))
-            the_day_before_last_day = get_today(get_now() - datetime.timedelta(days=2))
-            self.dnf_shanguang_op(f"签到-{today}", "812092", weekDay=today)
-            self.dnf_shanguang_op(f"补签-{last_day}", "812379", weekDay=last_day)
-            wait_for("等待一会", 5)
-            self.dnf_shanguang_op(f"补签-{the_day_before_last_day}", "812379", weekDay=the_day_before_last_day)
+            # last_day = get_today(get_now() - datetime.timedelta(days=1))
+            # the_day_before_last_day = get_today(get_now() - datetime.timedelta(days=2))
+            self.dnf_shanguang_op(f"签到-{today}", "863326", weekDay=today)
+            # self.dnf_shanguang_op(f"补签-{last_day}", "863327", weekDay=last_day)
+            # wait_for("等待一会", 5)
+            # self.dnf_shanguang_op(f"补签-{the_day_before_last_day}", "863327", weekDay=the_day_before_last_day)
 
         # --------------------------------------------------------------------------------
 
         # self.dnf_shanguang_op("报名礼", "724862")
-        self.dnf_shanguang_op("app专属礼", "812030")
-        logger.warning(color("fg_bold_cyan") + "不要忘记前往网页手动报名并领取报名礼以及前往app领取一次性礼包")
-        async_message_box("不要忘记前往网页手动报名以及前往心悦app领取一次性礼包", f"DNF闪光杯奖励提示_{get_act_url('DNF闪光杯')}", show_once=True)
+        self.dnf_shanguang_op("报名礼包", "863329")
+        self.dnf_shanguang_op("app专属礼", "863325")
+        async_message_box("请手动前往网页手动报名以及前往心悦app领取一次性礼包", f"DNF闪光杯奖励提示_{get_act_url('DNF闪光杯')}", show_once=True)
 
-        # 签到
-        check_in()
-
-        self.dnf_shanguang_op("周四签到礼-闪光礼盒", "812397")
-        time.sleep(5)
+        # # 签到
+        # check_in()
 
         # 周赛奖励
-        logger.warning(color("bold_yellow") + f"本周已获得指定装备{self.query_dnf_shanguang_equip_count()}件，具体装备可去活动页面查看")
-        for weekday in [
-            "20211118",
-            "20211125",
-            "20211202",
-        ]:
-            self.dnf_shanguang_op(f"输出当前周期爆装信息 - {weekday}", "812029", weekDay=weekday)
-            self.dnf_shanguang_op(f"周周闪光好礼 - {weekday}", "812031", weekDay=weekday)
+        week_4 = get_today(get_this_thursday_of_dnf())
+        week_4_to_flowid = {
+            "20220623": "864758",
+            "20220630": "864759",
+            "20220707": "864760",
+        }
+
+        if week_4 in week_4_to_flowid:
+            flow_id = week_4_to_flowid[week_4]
+            self.dnf_shanguang_op(f"领取本周的爆装奖励 - {week_4}", flow_id)
             time.sleep(5)
 
         # 抽奖
-        for idx in range_from_one(6):
-            res = self.dnf_shanguang_op(f"周周开大奖 - {idx}", "812032")
+        self.dnf_shanguang_op("每日登录游戏-送抽奖资格", "861111")
+        for idx in range_from_one(5):
+            res = self.dnf_shanguang_op(f"抽奖 - {idx}", "863330")
             if int(res["ret"]) != 0:
                 break
             time.sleep(5)
-
-        self.dnf_shanguang_show_equipments()
-
-    @try_except(show_exception_info=False)
-    def dnf_shanguang_show_equipments(self):
-        msg_list = []
-        msg_list.append("")
-        msg_list.append("本周的目标爆装列表如下")
-
-        # info = self.query_dnf_shanguang_info()
-        # equipment_code_list = info.sOutValue3.split('_')
-        # for code in equipment_code_list:
-        #     msg_list.append('\t' + equipment_code_to_name.get(code, code))
-
-        # 本期的列表是写死的
-        week_to_target_equipments = {
-            "20211118": ("军神的心之所念（神话）", "太极天帝剑", "星之海:巴德纳尔", "骚动的冥焰", "堕入地狱之脚", "矛盾的抉择"),
-            "20211125": ("逆转结局（神话）", "白虎啸魂手套", "绝杀:无人生还", "支配黑暗之环", "军神的庇护宝石", "正义的抉择"),
-            "20211202": ("深渊囚禁者长袍（神话）", "哈蒂 - 赎月者", "无尽地狱黑暗之印", "军神的遗书", "驱散黑暗短裤", "暗黑术士亲笔古书"),
-        }
-        week_4 = get_this_thursday_of_dnf()
-        target_euiipments = week_to_target_equipments.get(get_today(week_4), ())
-        msg_list.extend([f"\t{idx + 1}. {equipment}" for idx, equipment in enumerate(target_euiipments)])
-
-        logger.info(color("bold_cyan") + "\n".join(msg_list))
-
-    def query_dnf_shanguang_info(self) -> AmesvrCommonModRet:
-        raw_info = self.dnf_shanguang_op("查询信息", "812037", print_res=False)
-        info = parse_amesvr_common_info(raw_info)
-
-        return info
-
-    def get_dnf_shanguang_lottery_times(self) -> int:
-        # res = self.dnf_shanguang_op("闪光夺宝次数", "724885", print_res=False)
-        # return int(res["modRet"]["sOutValue3"])
-        return 6
-
-    @try_except(show_exception_info=False, return_val_on_except=0)
-    def query_dnf_shanguang_equip_count(self, print_warning=True):
-        this_thursday = get_today(get_this_thursday_of_dnf())
-        res = self.dnf_shanguang_op(f"输出当前周期爆装信息-{this_thursday}", "812029", weekDay=this_thursday, print_res=False)
-        equip_count = 0
-        if "modRet" in res:
-            info = parse_amesvr_common_info(res)
-            equip_count = int(info.sOutValue1)
-        else:
-            if print_warning:
-                logger.warning(color("bold_yellow") + "是不是还没有报名？")
-
-        return equip_count
 
     def check_dnf_shanguang(self):
         self.check_bind_account(
             "DNF闪光杯",
             get_act_url("DNF闪光杯"),
             activity_op_func=self.dnf_shanguang_op,
-            query_bind_flowid="812024",
-            commit_bind_flowid="812023",
+            query_bind_flowid="861102",
+            commit_bind_flowid="861101",
         )
 
     def dnf_shanguang_op(self, ctx, iFlowId, weekDay="", print_res=True, **extra_params):
@@ -3326,7 +3324,7 @@ class DjcHelper:
             iActivityId,
             iFlowId,
             print_res,
-            "https://xinyue.qq.com/act/a20201221sgb",
+            get_act_url("DNF闪光杯"),
             weekDay=weekDay,
             **extra_params,
         )
@@ -3677,14 +3675,23 @@ class DjcHelper:
 
         logger.warning(color("bold_yellow") + "如果下面的请求提示 【登陆态失效，请重新登录！】，很有可能是你的号不能参与这个活动。手动登录这个活动的网页，然后点击领取，应该也会弹相同的提示")
 
-        self.qq_video_iwan_op("幸运勇士礼包", "XrQJLB1FN")
-        self.qq_video_iwan_op("勇士见面礼", "ur5nh8ZiM")
+        self.qq_video_iwan_op("幸运勇士礼包", "qXcsHHmOg")
+        self.qq_video_iwan_op("全民大礼包", "2hiHF_yAf")
+        # self.qq_video_iwan_op("勇士见面礼", "ur5nh8ZiM")
         # self.qq_video_iwan_op("每日抽奖（需要在页面开视频会员）", "fj174odxr")
-        self.qq_video_iwan_op("在线30分钟签到", "1X7VUbqgr")
-        self.qq_video_iwan_op("累计 3 天", "ql8qD9_NH")
-        self.qq_video_iwan_op("累计 7 天", "jyi3LQ9bo")
-        self.qq_video_iwan_op("累计 10 天", "uBiO594xn")
-        self.qq_video_iwan_op("累计 15 天", "U4urMEDRr")
+        # self.qq_video_iwan_op("在线30分钟签到", "1X7VUbqgr")
+        # self.qq_video_iwan_op("累计 3 天", "ql8qD9_NH")
+        # self.qq_video_iwan_op("累计 7 天", "jyi3LQ9bo")
+        # self.qq_video_iwan_op("累计 10 天", "uBiO594xn")
+        # self.qq_video_iwan_op("累计 15 天", "U4urMEDRr")
+
+        act_url = get_act_url("qq视频蚊子腿-爱玩")
+        async_message_box(
+            "QQ视频活动有个专属光环和其他道具可以兑换，不过至少得在页面上充值两个月的QQ视频会员。各位如有需求，可以自行前往活动页面进行购买与兑换~",
+            f"QQ视频活动-光环-{act_url}",
+            open_url=act_url,
+            show_once=True,
+        )
 
     def qq_video_iwan_op(self, ctx: str, missionId: str, qq_access_token="", qq_openid="", qq_appid="", print_res=True):
         role = self.get_dnf_bind_role_copy()
@@ -3798,16 +3805,23 @@ class DjcHelper:
             [
                 extra_msg,
                 "",
-                f"账号 {self.cfg.name} 助手token已过期或者未填写，请到群里({self.common_cfg.qq_group})发【助手token】，机器人会自动回复最新的获取token的方式",
+                f"账号 {self.cfg.name} 助手token已过期或者未填写，请打开【使用教程/使用文档.docx】，查看其中的【获取助手token】章节的说明",
             ]
         )
 
         logger.warning("\n" + color("fg_bold_yellow") + tips)
         # 首次在对应场景时弹窗
         if always_show_message_box or (
-            show_message_box_once_key != "" and is_first_run(f"show_dnf_helper_info_guide_{show_message_box_once_key}")
+            show_message_box_once_key != ""
+            and is_first_run(self.get_show_dnf_helper_info_guide_key(show_message_box_once_key))
         ):
             async_message_box(tips, "助手信息获取指引", print_log=False)
+
+    def reset_show_dnf_helper_info_guide_key(self, show_message_box_once_key: str):
+        reset_first_run(self.get_show_dnf_helper_info_guide_key(show_message_box_once_key))
+
+    def get_show_dnf_helper_info_guide_key(self, show_message_box_once_key: str) -> str:
+        return f"show_dnf_helper_info_guide_{self.cfg.name}_{show_message_box_once_key}"
 
     # --------------------------------------------dnf助手排行榜活动--------------------------------------------
     def dnf_rank(self):
@@ -3929,39 +3943,45 @@ class DjcHelper:
             self.show_dnf_helper_info_guide(extra_msg, show_message_box_once_key=f"dnf_helper_{get_act_url('dnf助手活动')}")
             return
 
-        @try_except(return_val_on_except=0)
-        def query_signin_count() -> int:
-            raw_res = self.dnf_helper_op("查询", "824767", print_res=False)
+        def query_lottery_count() -> int:
+            raw_res = self.dnf_helper_op("查询抽奖次数", "850836", print_res=False)
             info = parse_amesvr_common_info(raw_res)
 
-            count = int(info.sOutValue2.split(";")[1])
-            return count
+            return int(info.sOutValue3)
 
-        self.dnf_helper_op("抽取果实", "823806")
-        total_count = query_signin_count()
-        logger.info(color("bold_yellow") + f"当前累计每日摘取次数为: {total_count} 次")
+        def query_current_week_index() -> int:
+            raw_res = self.dnf_helper_op("查询周序号", "850836", print_res=False)
+            info = parse_amesvr_common_info(raw_res)
 
-        award_infos = [
-            (1, "824741"),
-            (2, "824745"),
-            (4, "824746"),
-            (6, "824747"),
-            (9, "824748"),
-            (12, "824750"),
-            (16, "824751"),
-            (23, "824752"),
+            week_status_list = info.sOutValue6.split(";")
+            for idx, status in enumerate(week_status_list):
+                if status == "0":
+                    return idx
+
+            return len(week_status_list) - 1
+
+        self.dnf_helper_op("每日抽奖积分", "850973")
+        self.dnf_helper_op("完成任务赠送", "851051")
+
+        lottery_count = query_lottery_count()
+        logger.info(f"当前剩余抽奖次数为 {lottery_count}")
+        for idx in range_from_one(lottery_count):
+            self.dnf_helper_op(f"{idx}/{lottery_count} 每日抽奖", "850957")
+            time.sleep(5)
+
+        week_awards = [
+            ("累签奖励", "850975"),
+            ("累签奖励2", "852938"),
+            ("累签奖励3", "852939"),
+            ("累签奖励4", "852940"),
+            ("累签奖励5", "852941"),
         ]
-        for require_days, flowid in award_infos:
-            if total_count >= require_days:
-                self.dnf_helper_op(f"摘取 {require_days} 次", flowid)
-            else:
-                logger.warning("签到次数不够，跳过尝试领取后续奖励")
-                break
+        week_index = query_current_week_index()
+        logger.info(f"当前为第 {week_index + 1} 周")
 
-        if get_today() == "20211225":
-            self.dnf_helper_op("限时领取1225", "824754")
-        if get_today() == "20220101":
-            self.dnf_helper_op("限时领取0101", "824757")
+        name, flowid = week_awards[week_index]
+        for actSign in range_from_one(5):
+            self.dnf_helper_op(f"{name} - {flowid} - 第 {actSign} 天", flowid, actSign=actSign)
 
     # def check_dnf_helper(self):
     #     self.check_bind_account("dnf助手活动", get_act_url("dnf助手活动"),
@@ -4056,53 +4076,50 @@ class DjcHelper:
             )
             return
 
-        @try_except(return_val_on_except=0)
-        def query_signin_count() -> int:
-            raw_res = self.dnf_helper_dup_op("查询", "828448", print_res=False)
-            info = parse_amesvr_common_info(raw_res)
+        self.check_dnf_helper_dup()
 
-            count = int(info.sOutValue2.split(";")[1])
-            return count
+        # <option value="1">周一</option>
+        # <option value="2">周二</option>
+        # <option value="3">周三</option>
+        # <option value="4">周四</option>
+        # <option value="5">周五</option>
+        # <option value="6">周末</option>
+        # <option value="7">全部</option>
+        # <option value="8">时间不定</option>
+        if is_daily_first_run(f"打团报名_{self.cfg.name}"):
+            self.dnf_helper_dup_op("报名", "851838", prefer="6")
 
-        self.dnf_helper_dup_op("异界寻宝", "828436")
-        total_count = query_signin_count()
-        logger.info(color("bold_yellow") + f"当前累计每日摘取次数为: {total_count} 次")
+            logger.info("等待10秒后再进行下一个操作")
+            time.sleep(10)
 
-        award_infos = [
-            (1, "828438"),
-            (2, "828439"),
-            (4, "828440"),
-            (7, "828441"),
-            (10, "828442"),
-            (12, "828443"),
-            (15, "828444"),
-            (19, "828445"),
-            (25, "828477"),
-        ]
-        for require_days, flowid in award_infos:
-            if total_count >= require_days:
-                self.dnf_helper_dup_op(f"摘取 {require_days} 次", flowid)
-            else:
-                logger.warning("签到次数不够，跳过尝试领取后续奖励")
-                break
+        self.dnf_helper_dup_op("周末礼包", "844295")
 
-        sign_infos = [
-            ("20220125", "828478"),
-            ("20220126", "828565"),
-            ("20220131", "828566"),
-            ("20220201", "828567"),
-            ("20220203", "828568"),
-            ("20220205", "828569"),
-            ("20220208", "828570"),
-            ("20220215", "828571"),
-        ]
-        today = get_today()
-        logger.info(f"今天是 {today}")
-        for sign_date, flowid in sign_infos:
-            if today == sign_date:
-                self.dnf_helper_dup_op(f"限时领取 - {sign_date}", flowid)
-            else:
-                logger.warning(f"今天不是 {sign_date}，将跳过该签到奖励")
+        async_message_box(
+            "仅尝试报名和领取周末礼包，积分兑换请自行前往dnf助手的活动页面按照个人喜好进行兑换~", "打团活动", show_once=True, open_url=get_act_url("dnf助手活动Dup")
+        )
+        # self.dnf_helper_dup_op("积分兑换--2积分限20次_复活币", "845120")
+        # self.dnf_helper_dup_op("积分兑换--4积分限20次_闪亮", "853815")
+        # self.dnf_helper_dup_op("积分兑换--4积分限20次_王者改镶嵌", "853816")
+        # self.dnf_helper_dup_op("积分兑换--10积分限20次_一次性继承", "853817")
+        # self.dnf_helper_dup_op("积分兑换--8积分限30次每周2_装备", "853818")
+        # self.dnf_helper_dup_op("积分兑换--15积分每周2_华丽", "853819")
+        # self.dnf_helper_dup_op("积分兑换--20积分10次_黑砖15天", "853820")
+        # self.dnf_helper_dup_op("积分兑换--40积分限每月1_+10装备强化", "853821")
+        # self.dnf_helper_dup_op("积分兑换--30积分每周1次_异界", "853822")
+        # self.dnf_helper_dup_op("积分兑换--60积分每周1_纯净", "853823")
+        # self.dnf_helper_dup_op("积分兑换--25积分每周1_次元", "853824")
+        # self.dnf_helper_dup_op("积分兑换--160积分每周1 _ 10装备增幅券", "853825")
+        # self.dnf_helper_dup_op("积分兑换--160积分每周1_灿烂", "853826")
+        # self.dnf_helper_dup_op("积分兑换--240积分每周1_11装备增幅券", "853828")
+
+    def check_dnf_helper_dup(self):
+        self.check_bind_account(
+            "dnf助手活动Dup",
+            get_act_url("dnf助手活动Dup"),
+            activity_op_func=self.dnf_helper_dup_op,
+            query_bind_flowid="846972",
+            commit_bind_flowid="846971",
+        )
 
     def dnf_helper_dup_op(self, ctx, iFlowId, print_res=True, **extra_params):
         iActivityId = self.urls.iActivityId_dnf_helper_dup
@@ -4147,6 +4164,15 @@ class DjcHelper:
         return res
 
     # --------------------------------------------dnf助手编年史活动--------------------------------------------
+    # note: 测试流程
+    #   1. 使用手机抓包编年史页面，获取带各种校验参数的链接，并分享到电脑（或者直接在 https://mwegame.qq.com/fe/dnf/calculation/? 后面加上从生日活动获得的参数也可以）
+    #   2. 电脑使用chrome打开上述链接，并设置为手机模式，ua则使用 上面抓包得到的，或者： Mozilla/5.0 (Linux; Android 9; MIX 2 Build/PKQ1.190118.001; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/77.0.3865.120 MQQBrowser/6.2 TBS/045714 Mobile Safari/537.36 GameHelper_1006/2103060508
+    #   3. 在活动页面或者其他页面完成登陆后，即可正常测试
+    #   4. 脚本信息
+    #   4.1 入口：umi.{xxxx}.js
+    #   4.2 可用chrome格式化后，按照下列方式定位相关代码
+    #   4.3 参数信息：可搜索 common_params 中的对应key
+    #   4.4 接口代码：搜索 对应接口的api名称，如 list/exchange
     @try_except()
     def dnf_helper_chronicle(self):
         # dnf助手左侧栏
@@ -4163,8 +4189,6 @@ class DjcHelper:
             return
 
         # 为了不与其他函数名称冲突，且让函数名称短一些，写到函数内部~
-        url_wang = self.urls.dnf_helper_chronicle_wang_xinyue
-        url_mwegame = self.urls.dnf_helper_chronicle_mwegame
         dnf_helper_info = self.cfg.dnf_helper_info
         roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
         partition = roleinfo.serviceID
@@ -4176,9 +4200,43 @@ class DjcHelper:
             "sRoleId": roleid,
             "print_res": False,
             "uin": self.qq(),
+            "toUin": self.qq(),
             "token": dnf_helper_info.token,
             "uniqueRoleId": dnf_helper_info.uniqueRoleId,
+            "date": format_now("%Y-%m-%d"),
         }
+
+        # ------ 封装通用接口 ------
+        def wang_get(ctx: str, api: str, **extra_params) -> dict:
+            return self.get(
+                ctx,
+                self.urls.dnf_helper_chronicle_wang_xinyue,
+                api=api,
+                **common_params,
+                **extra_params,
+            )
+
+        def wegame_post(ctx: str, api: str, **extra_params) -> dict:
+            return self.post(
+                ctx,
+                self.urls.dnf_helper_chronicle_mwegame,
+                api=api,
+                **common_params,
+                **extra_params,
+            )
+
+        def yoyo_post(ctx: str, api: str, **extra_params) -> dict:
+            return self.post(
+                ctx,
+                self.urls.dnf_helper_chronicle_yoyo,
+                api=api,
+                data=post_json_to_data(
+                    {
+                        **common_params,
+                        **extra_params,
+                    }
+                ),
+            )
 
         # ------ 自动绑定 ------
         @try_except(return_val_on_except=None)
@@ -4263,37 +4321,75 @@ class DjcHelper:
 
         # ------ 绑定搭档 ------
         def bind_user_partner(ctx: str, partner_user_id: str, isBind="1"):
-            res = self.post(
-                ctx, url_mwegame, "", api="bindUserPartner", pUserId=partner_user_id, isBind=isBind, **common_params
+            res = wegame_post(
+                ctx,
+                "bindUserPartner",
+                pUserId=partner_user_id,
+                isBind=isBind,
             )
             logger.info(color("bold_green") + f"{ctx} 结果为: {res}")
 
+        # ------ 检查是否绑定QQ ------
+        @try_except()
+        def check_bind_qq():
+            bind_info = query_bind_qq_info()
+            if bind_info.is_need_transfer:
+                logger.warning(f"{self.cfg.name} 本月的编年史尚未与当前QQ绑定，将尝试自动绑定")
+                bind_ok = bind_qq()
+                if not bind_ok:
+                    extra_msg = "编年史未与QQ号进行绑定，且自动绑定流程失败了。请前往道聚城编年史页面手动进行绑定（进入后会见到形如 【账号确认 你是否将 XXX 作为本期参与编年活动的唯一账号 ... 】，使用正确的QQ登陆后，点击确认即可）"
+                    self.show_dnf_helper_info_guide(
+                        extra_msg, show_message_box_once_key=f"dnf_helper_chronicle_bind_qq_{get_month()}"
+                    )
+
+        def query_bind_qq_info() -> DnfHelperChronicleBindInfo:
+            raw_res = yoyo_post(
+                "查询助手与QQ绑定信息",
+                "getcheatguardbinding",
+                gameId=10014,
+            )
+
+            return DnfHelperChronicleBindInfo().auto_update_config(raw_res.get("data", {}))
+
+        @try_except(return_val_on_except=False)
+        def bind_qq() -> bool:
+            current_qq = self.qq()
+            raw_res = yoyo_post(
+                f"{self.cfg.name} 将编年史与当前QQ({current_qq})绑定",
+                "bindcheatguard",
+                gameId=10014,
+                bindUin=current_qq,
+            )
+
+            # {"result":0,"returnCode":0,"returnMsg":""}
+            return raw_res.get("returnCode", -1) == 0
+
         # ------ 查询各种信息 ------
         def exchange_list() -> DnfHelperChronicleExchangeList:
-            res = self.get("可兑换道具列表", url_wang, api="list/exchange", **common_params)
+            res = wang_get("可兑换道具列表", "list/exchange")
             return DnfHelperChronicleExchangeList().auto_update_config(res)
 
         def basic_award_list() -> DnfHelperChronicleBasicAwardList:
-            res = self.get("基础奖励与搭档奖励", url_wang, api="list/basic", **common_params)
+            res = wang_get("基础奖励与搭档奖励", "list/basic")
             return DnfHelperChronicleBasicAwardList().auto_update_config(res)
 
         def lottery_list() -> DnfHelperChronicleLotteryList:
-            res = self.get("碎片抽奖奖励", url_wang, api="lottery/receive", **common_params)
+            res = wang_get("碎片抽奖奖励", "lottery/receive")
             return DnfHelperChronicleLotteryList().auto_update_config(res)
 
         def getUserActivityTopInfo() -> DnfHelperChronicleUserActivityTopInfo:
-            res = self.post("活动基础状态信息", url_mwegame, "", api="getUserActivityTopInfo", **common_params)
+            res = wegame_post("活动基础状态信息", "getUserActivityTopInfo")
             return DnfHelperChronicleUserActivityTopInfo().auto_update_config(res.get("data", {}))
 
         def _getUserTaskList() -> dict:
-            return self.post("任务信息", url_mwegame, "", api="getUserTaskList", **common_params)
+            return wegame_post("任务信息", "getUserTaskList")
 
         def getUserTaskList() -> DnfHelperChronicleUserTaskList:
             res = _getUserTaskList()
             return DnfHelperChronicleUserTaskList().auto_update_config(res.get("data", {}))
 
         def sign_gifts_list() -> DnfHelperChronicleSignList:
-            res = self.get("连续签到奖励列表", url_wang, api="list/sign", **common_params)
+            res = wang_get("连续签到奖励列表", "list/sign")
             return DnfHelperChronicleSignList().auto_update_config(res)
 
         # ------ 领取各种奖励 ------
@@ -4329,16 +4425,17 @@ class DjcHelper:
                     normal_tasks.add(task.pActionId)
 
             logger.info("与心悦战场类似，即使未展示在接取列表内的任务，只要满足条件就可以领取奖励。因此接下来尝试领取其余任务(ps：这种情况下日志提示未完成也有可能是因为已经领取过~）")
+            logger.warning("曾经可以尝试未接到身上的任务，好像现在不可以了-。-，日后可以再试试，暂时先不尝试了 @2022.4.14")
             all_task = (
-                ("001", 8, "013", 4, "DNF助手签到"),
-                ("002", 11, "014", 6, "浏览资讯详情页"),
-                ("003", 9, "015", 5, "浏览动态详情页"),
-                ("004", 11, "016", 6, "浏览视频详情页"),
-                ("005", 17, "017", 10, "登陆游戏"),
-                ("007", 15, "019", 8, "进入游戏30分钟"),
-                ("008", 17, "020", 10, "分享助手周报"),
-                ("011", 20, "023", 9, "进入游戏超过1小时"),
-                ("036", 7, "037", 7, "完成勇士知道活动"),
+                # ("001", 8, "013", 4, "DNF助手签到"),
+                # ("002", 11, "014", 6, "浏览资讯详情页"),
+                # ("003", 9, "015", 5, "浏览动态详情页"),
+                # ("004", 11, "016", 6, "浏览视频详情页"),
+                # ("005", 17, "017", 10, "登陆游戏"),
+                # ("007", 15, "019", 8, "进入游戏30分钟"),
+                # ("008", 17, "020", 10, "分享助手周报"),
+                # ("011", 20, "023", 9, "进入游戏超过1小时"),
+                # ("036", 7, "037", 7, "完成勇士知道活动"),
             )
             for mActionId, mExp, pActionId, pExp, name in all_task:
                 if mActionId not in normal_tasks:
@@ -4358,12 +4455,22 @@ class DjcHelper:
                 logger.info(f"{actionName}已经领取过了")
 
         def doActionIncrExp(actionName, actionId, exp):
-            res = self.post("领取任务经验", url_mwegame, "", api="doActionIncrExp", actionId=actionId, **common_params)
+            res = yoyo_post("领取任务经验", "doactionincrexp", gameId=1006, actionId=actionId)
+
             data = res.get("data", 0)
             if data != 0:
                 logger.info(f"领取{actionName}-{actionId}，获取经验为{exp}，回包data={data}")
             else:
                 logger.warning(f"{actionName}尚未完成，无法领取哦~")
+
+            if dnf_helper_info.token != "":
+                # "returnCode": -30003, "returnMsg": "登录态失效，请重新登录"
+                show_message_box_once_key = "编年史token过期_" + get_week()
+                if res.get("returnCode", 0) == -30003:
+                    extra_msg = "dnf助手的登录态已过期，导致编年史相关操作无法执行，目前需要手动更新，具体操作流程如下"
+                    self.show_dnf_helper_info_guide(extra_msg, show_message_box_once_key=show_message_box_once_key)
+                else:
+                    self.reset_show_dnf_helper_info_guide_key(show_message_box_once_key)
 
         @try_except(show_last_process_result=False, extra_msg=extra_msg)
         def take_continuous_signin_gifts():
@@ -4383,8 +4490,13 @@ class DjcHelper:
 
         @try_except(show_last_process_result=False, extra_msg=extra_msg)
         def take_continuous_signin_gift_op(giftInfo: DnfHelperChronicleSignGiftInfo):
-            res = self.get("领取签到奖励", url_wang, api="send/sign", **common_params, amsid=giftInfo.sLbcode)
-            logger.info(f"领取连续签到{giftInfo.sDays}的奖励: {res.get('giftName', '出错啦')}")
+            res = wang_get(
+                "领取签到奖励",
+                "send/sign",
+                amsid=giftInfo.sLbcode,
+                num=1,
+            )
+            logger.info(f"领取连续签到 {giftInfo.sDays} 的奖励: {res}")
 
         @try_except(show_last_process_result=False, extra_msg=extra_msg)
         def take_basic_awards():
@@ -4434,18 +4546,16 @@ class DjcHelper:
             else:
                 mold = 2  # 队友
                 side = "队友"
-            res = self.get(
+            res = wang_get(
                 "领取基础奖励",
-                url_wang,
-                api="send/basic",
-                **common_params,
+                "send/basic",
                 isLock=awardInfo.isLock,
                 amsid=awardInfo.sLbCode,
                 iLbSel1=awardInfo.iLbSel1,
                 num=1,
                 mold=mold,
             )
-            logger.info(f"领取{side}的第{awardInfo.sName}个基础奖励: {res.get('giftName', f'出错啦-{res}')}")
+            logger.info(f"领取{side}的第{awardInfo.sName}个基础奖励: {awardInfo.giftName} - {res}")
             ret_msg = res.get("msg", "")
             if ret_msg == "登录态异常":
                 msg = f"账号 {self.cfg.name} 的 dnf助手鉴权信息不对，将无法领取奖励。请将配置工具中dnf助手的四个参数全部填写。或者直接月末手动去dnf助手app上把等级奖励都领一遍，一分钟搞定-。-"
@@ -4455,6 +4565,9 @@ class DjcHelper:
                 msg = f"账号 {self.cfg.name} 的 dnf助手app 绑定的角色与 道聚城app 绑定的角色不一样，会导致无法自动领取等级奖励，请将两个调整为一样的。"
                 if is_daily_first_run(f"编年史查询角色失败_{self.cfg.name}"):
                     async_message_box(msg, "助手角色不一致")
+            elif ret_msg == "角色绑定的账号错误":
+                msg = f"账号 {self.cfg.name} 的 dnf编年史尚未初始化，请手动去助手app到编年史页面完成初始化操作（也就是 是否绑定 QQ XXX 为本期编年史的账号），点下确认即可"
+                logger.warning(msg)
 
         def prompt_take_awards():
             # 如果有奖励，且未配置token，则在下列情况提醒手动领取
@@ -4495,7 +4608,7 @@ class DjcHelper:
                 all_exchanged = True
                 for ei in self.cfg.dnf_helper_info.chronicle_exchange_items:
                     if ei.sLbcode not in exchangeGiftMap:
-                        logger.error(f"未找到兑换项{ei.sLbcode}对应的配置，请参考utils/reference_data/dnf助手编年史活动_可兑换奖励列表.json")
+                        logger.error(f"未找到兑换项{ei.sLbcode}({ei.sName})对应的配置，请参考 {db.prepare_env_and_get_db_filepath()}")
                         continue
 
                     gift = exchangeGiftMap[ei.sLbcode]
@@ -4513,8 +4626,9 @@ class DjcHelper:
                         logger.warning(f"目前年史碎片数目为{userInfo.point}，不够兑换{gift.sName}所需的{gift.iCard}个，将跳过后续优先级较低的兑换奖励")
                         break
 
-                    for _i in range(ei.count):
-                        exchange_award_op(gift)
+                    exchange_count = min(ei.count, userInfo.point // int(gift.iCard))
+                    for idx in range_from_one(exchange_count):
+                        exchange_award_op(f"[{idx}/{exchange_count}]", gift)
 
                 if all_exchanged:
                     logger.info(color("fg_bold_yellow") + "似乎配置的兑换列表已到达兑换上限，建议开启抽奖功能，避免浪费年史碎片~")
@@ -4522,19 +4636,17 @@ class DjcHelper:
                 logger.info("未配置dnf助手编年史活动的兑换列表，若需要兑换，可前往配置文件进行调整")
 
         @try_except(show_last_process_result=False, extra_msg=extra_msg)
-        def exchange_award_op(giftInfo: DnfHelperChronicleExchangeGiftInfo):
-            res = self.get(
+        def exchange_award_op(ctx: str, giftInfo: DnfHelperChronicleExchangeGiftInfo):
+            res = wang_get(
                 "兑换奖励",
-                url_wang,
-                api="send/exchange",
-                **common_params,
+                "send/exchange",
                 exNum=1,
                 iCard=giftInfo.iCard,
                 amsid=giftInfo.sLbcode,
                 iNum=giftInfo.iNum,
                 isLock=giftInfo.isLock,
             )
-            logger.info(f"兑换奖励: {res.get('giftName', '出错啦')}")
+            logger.info(f"{ctx}兑换奖励: {res}")
 
         @try_except(show_last_process_result=False, extra_msg=extra_msg)
         def lottery():
@@ -4549,7 +4661,12 @@ class DjcHelper:
 
         def op_lottery(idx: int, totalLotteryTimes: int):
             ctx = f"[{idx}/{totalLotteryTimes}]"
-            res = self.get(f"{ctx} 抽奖", url_wang, api="send/lottery", **common_params, amsid="lottery_0007", iCard=10)
+            res = wang_get(
+                f"{ctx} 抽奖",
+                "send/lottery",
+                amsid="lottery_0007",
+                iCard=10,
+            )
             gift = res.get("giftName", "出错啦: " + res.get("msg", "未知错误"))
             beforeMoney = res.get("money", 0)
             afterMoney = res.get("value", 0)
@@ -4567,9 +4684,12 @@ class DjcHelper:
 
         # 检查领奖额外需要的参数
         if self.cfg.dnf_helper_info.token == "" or self.cfg.dnf_helper_info.uniqueRoleId == "":
-            extra_msg = "dnf助手的token/uniqueRoleId未配置，将无法领取等级奖励（其他似乎不受影响）。若想要自动领奖，请按照下列流程进行配置"
+            extra_msg = "dnf助手的token/uniqueRoleId未配置，将无法领取 【等级奖励】和【任务经验】（其他似乎不受影响）。若想要自动执行这些操作，请按照下列流程进行配置"
             self.show_dnf_helper_info_guide(extra_msg, show_message_box_once_key=f"dnf_helper_chronicle_{get_month()}")
             # 不通过也继续走，只是领奖会失败而已
+        else:
+            # 在设置了必要参数的情况下，检查是否绑定QQ
+            check_bind_qq()
 
         # 提示做任务
         msg = "dnf助手签到任务和浏览咨询详情页请使用auto.js等自动化工具来模拟打开助手去执行对应操作，当然也可以每天手动打开助手点一点-。-"
@@ -5064,8 +5184,8 @@ class DjcHelper:
                 logger.warning("未启用管家相关活动，将跳过尝试更新管家p_skey流程")
             return
 
-        if self.cfg.function_switches.disable_guanjia_pskey_activities:
-            logger.warning("已禁用管家pskey系列活动，将跳过尝试更新流程")
+        if self.cfg.function_switches.disable_login_mode_guanjia:
+            logger.warning("已禁用管家登录模式，将跳过尝试更新管家信息流程")
             return
 
         # 检查是否已在道聚城绑定
@@ -5094,13 +5214,13 @@ class DjcHelper:
             ql = QQLogin(self.common_cfg)
             if self.cfg.login_mode == "qr_login":
                 # 扫码登录
-                lr = ql.qr_login(login_mode=ql.login_mode_guanjia, name=self.cfg.name)
+                lr = ql.qr_login(ql.login_mode_guanjia, name=self.cfg.name, account=self.cfg.account_info.account)
             else:
                 # 自动登录
                 lr = ql.login(
                     self.cfg.account_info.account,
                     self.cfg.account_info.password,
-                    login_mode=ql.login_mode_guanjia,
+                    ql.login_mode_guanjia,
                     name=self.cfg.name,
                 )
             # 保存
@@ -5256,6 +5376,123 @@ class DjcHelper:
             "http://dnf.qq.com/cp/a20210312hello/",
             hello_id=self.cfg.hello_voice.hello_id,
             prize=prize,
+            **extra_params,
+        )
+
+    # --------------------------------------------DNF格斗大赛--------------------------------------------
+    @try_except()
+    def dnf_pk(self):
+        show_head_line("DNF格斗大赛功能")
+        self.show_amesvr_act_info(self.dnf_pk_op)
+
+        if not self.cfg.function_switches.get_dnf_pk or self.disable_most_activities():
+            logger.warning("未启用DNF格斗大赛功能，将跳过")
+            return
+
+        self.check_dnf_pk()
+
+        def query_ticket_count():
+            res = self.dnf_pk_op("查询数据", "852125", print_res=False)
+            raw_info = parse_amesvr_common_info(res)
+
+            return int(raw_info.sOutValue1)
+
+        self.dnf_pk_op("每日在线30分钟（977156）", "852098")
+        self.dnf_pk_op("每日PK（977162）", "852102")
+        self.dnf_pk_op("回流（977167）", "852107")
+
+        ticket = query_ticket_count()
+        logger.info(color("bold_cyan") + f"当前剩余抽奖券数目为：{ticket}")
+        for idx in range_from_one(ticket):
+            self.dnf_pk_op(f"[{idx}/{ticket}]幸运夺宝", "852109")
+            if idx != ticket:
+                time.sleep(5)
+
+        # self.dnf_pk_op("海选普发奖励（977173）", "852113")
+        # self.dnf_pk_op("周赛晋级奖励（977176）", "852115")
+        # self.dnf_pk_op("决赛普发奖励（977180）", "852123")
+        # self.dnf_pk_op("决赛冠军奖励（977181）", "852124")
+
+    def check_dnf_pk(self):
+        self.check_bind_account(
+            "DNF格斗大赛",
+            get_act_url("DNF格斗大赛"),
+            activity_op_func=self.dnf_pk_op,
+            query_bind_flowid="852085",
+            commit_bind_flowid="852084",
+        )
+
+    def dnf_pk_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_dnf_pk
+
+        return self.amesvr_request(
+            ctx,
+            "x6m5.ams.game.qq.com",
+            "group_3",
+            "dnf",
+            iActivityId,
+            iFlowId,
+            print_res,
+            "http://dnf.qq.com/cp/a20210405pk/",
+            **extra_params,
+        )
+
+    # --------------------------------------------DNF强者之路--------------------------------------------
+    @try_except()
+    def dnf_strong(self):
+        show_head_line("DNF强者之路功能")
+        self.show_amesvr_act_info(self.dnf_strong_op)
+
+        if not self.cfg.function_switches.get_dnf_strong or self.disable_most_activities():
+            logger.warning("未启用DNF强者之路功能，将跳过")
+            return
+
+        self.check_dnf_strong()
+
+        def query_ticket_count():
+            res = self.dnf_strong_op("查询数据", "747206", print_res=False)
+            raw_info = parse_amesvr_common_info(res)
+
+            return int(raw_info.sOutValue2)
+
+        self.dnf_strong_op("领取报名礼包", "747207")
+        self.dnf_strong_op("领取排行礼包", "747208")
+
+        self.dnf_strong_op("每日在线30分钟", "747222")
+        self.dnf_strong_op("通关一次强者之路 （试炼模式）", "747227")
+        self.dnf_strong_op("每日特权网吧登陆", "747228")
+
+        ticket = query_ticket_count()
+        logger.info(color("bold_cyan") + f"当前剩余抽奖券数目为：{ticket}")
+        for idx in range_from_one(ticket):
+            self.dnf_strong_op(f"[{idx}/{ticket}]幸运夺宝", "747209")
+            if idx != ticket:
+                time.sleep(5)
+
+        self.dnf_strong_op("决赛普发礼包", "761894")
+        self.dnf_strong_op("决赛冠军礼包", "761893")
+
+    def check_dnf_strong(self):
+        self.check_bind_account(
+            "DNF强者之路",
+            get_act_url("DNF强者之路"),
+            activity_op_func=self.dnf_strong_op,
+            query_bind_flowid="747146",
+            commit_bind_flowid="747145",
+        )
+
+    def dnf_strong_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_dnf_strong
+
+        return self.amesvr_request(
+            ctx,
+            "x6m5.ams.game.qq.com",
+            "group_3",
+            "dnf",
+            iActivityId,
+            iFlowId,
+            print_res,
+            get_act_url("DNF强者之路"),
             **extra_params,
         )
 
@@ -5514,65 +5751,6 @@ class DjcHelper:
             need_try_func=None,
         )
 
-    # --------------------------------------------DNF强者之路--------------------------------------------
-    @try_except()
-    def dnf_strong(self):
-        show_head_line("DNF强者之路功能")
-        self.show_amesvr_act_info(self.dnf_strong_op)
-
-        if not self.cfg.function_switches.get_dnf_strong or self.disable_most_activities():
-            logger.warning("未启用DNF强者之路功能，将跳过")
-            return
-
-        self.check_dnf_strong()
-
-        def query_ticket_count():
-            res = self.dnf_strong_op("查询数据", "747206", print_res=False)
-            raw_info = parse_amesvr_common_info(res)
-
-            return int(raw_info.sOutValue2)
-
-        self.dnf_strong_op("领取报名礼包", "747207")
-        self.dnf_strong_op("领取排行礼包", "747208")
-
-        self.dnf_strong_op("每日在线30分钟", "747222")
-        self.dnf_strong_op("通关一次强者之路 （试炼模式）", "747227")
-        self.dnf_strong_op("每日特权网吧登陆", "747228")
-
-        ticket = query_ticket_count()
-        logger.info(color("bold_cyan") + f"当前剩余抽奖券数目为：{ticket}")
-        for idx in range_from_one(ticket):
-            self.dnf_strong_op(f"[{idx}/{ticket}]幸运夺宝", "747209")
-            if idx != ticket:
-                time.sleep(5)
-
-        self.dnf_strong_op("决赛普发礼包", "761894")
-        self.dnf_strong_op("决赛冠军礼包", "761893")
-
-    def check_dnf_strong(self):
-        self.check_bind_account(
-            "DNF强者之路",
-            get_act_url("DNF强者之路"),
-            activity_op_func=self.dnf_strong_op,
-            query_bind_flowid="747146",
-            commit_bind_flowid="747145",
-        )
-
-    def dnf_strong_op(self, ctx, iFlowId, print_res=True, **extra_params):
-        iActivityId = self.urls.iActivityId_dnf_strong
-
-        return self.amesvr_request(
-            ctx,
-            "x6m5.ams.game.qq.com",
-            "group_3",
-            "dnf",
-            iActivityId,
-            iFlowId,
-            print_res,
-            get_act_url("DNF强者之路"),
-            **extra_params,
-        )
-
     # --------------------------------------------DNF心悦--------------------------------------------
     @try_except()
     def dnf_xinyue(self):
@@ -5585,59 +5763,102 @@ class DjcHelper:
 
         self.check_dnf_xinyue()
 
-        @try_except(return_val_on_except=0)
-        def query_signin_days():
-            res = self.dnf_xinyue_op("查询签到天数", "823142", print_res=False)
-            info = parse_amesvr_common_info(res)
-            return int(info.sOutValue8.split("|")[3])
+        def has_bind_friend() -> bool:
+            res = self.dnf_xinyue_op("查询信息", "860785", print_res=True)
+            raw_info = parse_amesvr_common_info(res)
 
-        self.dnf_xinyue_op("预约礼包", "823407")
+            return "@@" in raw_info.sOutValue3
 
-        if now_after("2022-01-10 00:00:00"):
+        @try_except()
+        def draw_card():
+            raw_res = self.dnf_xinyue_op("每日登录游戏抽卡", "861017")
+            if raw_res["ret"] != "0":
+                return
+
+            card_name = raw_res["modRet"]["sPackageName"]
+            if card_name == "14":
+                async_message_box(f"{self.cfg.name} 抽到了 心悦集卡的 14，运气真不错-。-可以兑换天三，或者去闲鱼卖掉，现在好像可以卖五六百了", "心悦集卡欧皇提示")
+
+            # 统计一下每天使用小助手的人抽到的卡片的分布情况，方便有个直观了解
+            increase_counter(ga_category="心悦集卡-抽卡结果", name=card_name)
+
+        def show_card_summary(card_counts: list[int]):
+            logger.info(f"当前卡片概览为: {card_counts}")
+
+            card_names = ["14", "周", "年", "狂", "欢"]
+            for idx, count in enumerate(card_counts):
+                name = card_names[idx]
+                logger.info(f"{name}: {count}")
+
+                # 为了对全局存量有个了解，增加统计各个卡牌的存量信息
+                increase_counter(ga_category=f"心悦集卡-存量-{name}", name=count)
+                time.sleep(1)
+
+        self.dnf_xinyue_op("特邀等级礼", "861002")
+        self.dnf_xinyue_op("V1等级礼", "860777")
+        self.dnf_xinyue_op("V2等级礼", "861003")
+        self.dnf_xinyue_op("V3等级礼", "861004")
+
+        self.dnf_xinyue_op("登录有礼", "861007")
+        self.dnf_xinyue_op("充值礼", "861011")
+        self.dnf_xinyue_op("App专属礼", "861012")
+        if now_after("2022-06-16 18:00:00"):
+            async_message_box("心悦活动可在app领取一次性奖励，请自行打开app在DNF专区领取~", "22.6心悦活动-app礼包", show_once=True)
+
+        self.dnf_xinyue_op("加群送亲密值", "861908")
+
+        draw_card()
+        self.dnf_xinyue_op("超级大奖-集卡领天三", "861016")
+
+        card_counts = self.query_xinyue_card_counts()
+        show_card_summary(card_counts)
+
+        send_to_qq = self.common_cfg.xinyue_send_card_target_qq
+        if send_to_qq != "" and self.qq() != send_to_qq:
+            logger.info(f"当前配置了心悦周年集卡赠送目标QQ({send_to_qq})，将尝试赠送给该QQ")
+            for idx, count in enumerate(card_counts):
+                if count == 0:
+                    continue
+
+                card_index = idx + 1
+                self.dnf_xinyue_op(
+                    f"{self.qq()} 尝试赠送卡 {card_index} 给 {send_to_qq}", "861085", card=card_index, sendQQ=send_to_qq
+                )
+
+        if send_to_qq == "":
+            async_message_box("如果本地配置了多个账号，且其中有每日上线的账号，可以配置", "22.6心悦活动-设置赠送目标", show_once=True)
+
+        for count in [40, 100, 140]:
+            time.sleep(5)
+            self.dnf_xinyue_op(f"亲密值领取-{count}", "860783", num=count)
+
+        if not has_bind_friend():
             async_message_box(
-                "1.10之后每充值200元，可以在心悦活动页面中自选奖池并进行一次抽奖。因为部分奖励是自行选定的，因此请自行完成~",
-                "2022心悦充值活动",
+                f"{self.cfg.name} 当前未绑定心悦活动的紧密好友，部分奖励可能无法领取，请手动在活动页面进行领取~",
+                "22.6心悦活动-绑定好友",
+                open_url=get_act_url("DNF心悦"),
                 show_once=True,
             )
-            # self.dnf_xinyue_op("记录自选道具", "824237")
-            # self.dnf_xinyue_op("放烟花抽奖", "823813")
-            # self.dnf_xinyue_op("累计抽奖礼", "823808")
 
-        if now_before("2022-01-10 00:00:00"):
-            self.dnf_xinyue_op("静候佳期礼", "824223")
-        else:
-            self.dnf_xinyue_op("特邀会员身份礼", "823413")
-            self.dnf_xinyue_op("心悦会员身份礼", "823414")
+    def query_xinyue_card_counts(self) -> list[int]:
+        res = self.dnf_xinyue_op("查询信息", "860785", print_res=False)
+        raw_info = parse_amesvr_common_info(res)
 
-        self.dnf_xinyue_op("全员狂欢礼-任务3-充值66元", "823636")
-        self.dnf_xinyue_op("全员狂欢礼-任务2-消耗疲劳>=100点", "823417")
-        self.dnf_xinyue_op("全员狂欢礼-任务1-在线时长>=120分钟", "823415")
+        card_counts = []
+        for raw_card_info in raw_info.sOutValue6.split("|")[1:-1]:
+            card_count = int(raw_card_info.strip().split(" ")[2])
 
-        # self.dnf_xinyue_op("全员狂欢任务1揭榜", "823418")
-        # self.dnf_xinyue_op("全员狂欢任务2揭榜", "823437")
-        # self.dnf_xinyue_op("全员狂欢任务3揭榜", "823438")
+            card_counts.append(card_count)
 
-        self.dnf_xinyue_op("每日签到礼包-在线10分钟", "823675")
-        signin_days = query_signin_days()
-        logger.info(f"当前累计签到天数为 {signin_days}")
-        for day in [3, 7, 10, 15, 21, 28]:
-            if signin_days < day:
-                logger.info(f"签到天数({signin_days}) 不足 {day} 天，将不尝试领取后续累计签到奖励")
-                break
-
-            self.dnf_xinyue_op(f"累计签到礼 - {day} 天", "823679", param=day)
-
-        if now_after("2022-01-01 00:00:00"):
-            self.dnf_xinyue_op("心悦app专属礼包", "823803")
-            async_message_box("心悦app专属礼包请自行前往app进行领取", "2022心悦充值活动-专属礼包", show_once=True)
+        return card_counts
 
     def check_dnf_xinyue(self):
         self.check_bind_account(
             "DNF心悦",
             get_act_url("DNF心悦"),
             activity_op_func=self.dnf_xinyue_op,
-            query_bind_flowid="823130",
-            commit_bind_flowid="823129",
+            query_bind_flowid="860768",
+            commit_bind_flowid="860767",
         )
 
     def dnf_xinyue_op(self, ctx, iFlowId, print_res=True, **extra_params):
@@ -5935,22 +6156,26 @@ class DjcHelper:
         shareCodeList = db.share_code_list
 
         sContents = [
-            "CJBBGFLT",
-            "CJBBQKF",
-            "CJQKF",
+            "DNF生日快乐",
+            "曹操出行打车便宜",
+            "电脑数码万店齐发",
+            "DNFJQR",
         ]
         random.shuffle(sContents)
         sContents = [*shareCodeList, *sContents]
         for sContent in sContents:
             exchange_package(sContent)
 
-        # 登陆游戏领福利
-        self.dnf_welfare_login_gifts_op("1月20 - 22日登录礼包", "831262")
-        self.dnf_welfare_login_gifts_op("1月23 - 26日登录礼包", "831263")
-        self.dnf_welfare_login_gifts_op("1月27日 - 2月2日登录礼包", "831264")
-
         # 分享礼包
-        self.dnf_welfare_login_gifts_op("分享奖励领取", "831272", siActivityId=query_siActivityId())
+        self.dnf_welfare_op("分享奖励领取", "863948", siActivityId=query_siActivityId())
+
+        # # 登陆游戏领福利
+        # self.dnf_welfare_login_gifts_op("1月20 - 22日登录礼包", "831262")
+        # self.dnf_welfare_login_gifts_op("1月23 - 26日登录礼包", "831263")
+        # self.dnf_welfare_login_gifts_op("1月27日 - 2月2日登录礼包", "831264")
+        #
+        # # 分享礼包
+        # self.dnf_welfare_login_gifts_op("分享奖励领取", "831272", siActivityId=query_siActivityId())
 
     def check_dnf_welfare(self):
         self.check_bind_account(
@@ -6019,74 +6244,64 @@ class DjcHelper:
 
         self.check_dnf_dianzan()
 
-        def report_first_login():
-            raw_page_info = self.dnf_dianzan_op("查询页面数据", "811832", print_res=False)
-            page_info = parse_amesvr_common_info(raw_page_info)
-            if page_info.sOutValue1 != "0":
-                return
+        def query_info() -> tuple[int, int, int]:
+            res = self.dnf_dianzan_op("查询信息", "860276", print_res=False)
+            info = parse_amesvr_common_info(res)
 
-            self.dnf_dianzan_op("登录页面", "811831")
+            loginGame, playRaid, loginPage, drawTimes = info.sOutValue1.split("|")
 
-        def get_one_work_randomly(mod_name: str, iType: str, iPage: str) -> CreateWorkInfo:
-            raw_work_info_list = self.dnf_dianzan_op("登录显示列表", "814952", iType=iType, iPage="1", print_res=False)
-            work_info_list = CreateWorkListInfo().auto_update_config(raw_work_info_list["modRet"]["jData"]["worklist"])
+            voteTickets, totalGetTickets = info.sOutValue2.split("|")
+            voteTimes = int(totalGetTickets) - int(voteTickets)
 
-            work_info = random.choice(work_info_list.list)
-            logger.info(f"为避免影响最终投票数据，随机选一个作品来投票，本次选中的作品为 {work_info.sTitle}")
+            return int(voteTickets), int(voteTimes), int(drawTimes)
 
-            return work_info
+        def query_work_info_list() -> list[VoteEndWorkInfo]:
+            res = self.dnf_dianzan_op("查询投票列表", "860311", print_res=False)
+            info = VoteEndWorkList().auto_update_config(res["modRet"]["jData"])
 
-        # ----------------------------------------------------
+            work_info_list: list[VoteEndWorkInfo] = []
+            for workId, tickets in info.data.items():
+                work_info = VoteEndWorkInfo()
+                work_info.workId = workId
+                work_info.tickets = int(tickets)
 
-        report_first_login()
+                work_info_list.append(work_info)
 
-        # 给每个模块随机投票
-        mod_types = [
-            ("8", "文学"),
-            ("10", "音乐"),
-            ("7", "视频"),
-            ("11", "cosplay"),
-            ("14", "表情包"),
-            ("9", "美术"),
-            ("12", "周边设计"),
-        ]
-        for mod_type, mod_name in mod_types:
-            if not is_weekly_first_run(f"点赞_{self.uin()}_{get_act_url('DNF共创投票')}_{mod_type}"):
-                logger.info(f"{mod_name} 已经投票过一次，不再尝试，避免过多影响投票数据")
-                continue
+            return work_info_list
 
-            work_info = get_one_work_randomly(mod_name, mod_type, "1")
+        self.dnf_dianzan_op("登陆游戏获取票数（988902）", "860275")
+        self.dnf_dianzan_op("通关副本（988956）", "860326")
+        self.dnf_dianzan_op("分享（988959）", "860331")
 
-            desc = f"{work_info.iInfoId} - {work_info.sUserCreator} - {work_info.sTitle}"
+        voteTickets, voteTimes, _ = query_info()
+        logger.info(f"已拥有投票次数：{voteTickets} 已完成投票次数：{voteTimes}")
+        if voteTickets > 0:
+            all_work_info = query_work_info_list()
+            work_info_list = random.sample(all_work_info, voteTickets)
+            logger.info(f"随机从 {len(all_work_info)} 个最终投票中选 {voteTickets} 个进行投票")
 
-            self.dnf_dianzan_op(
-                f"{mod_type}-{mod_name}: 随机挑选一个点赞 - {desc}", "812365", iType=mod_type, iWork=work_info.iInfoId
-            )
+            for work_info in work_info_list:
+                self.dnf_dianzan_op(
+                    f"投票 - {work_info.workId} (已有投票: {work_info.tickets})", "860300", workId=work_info.workId
+                )
+                time.sleep(5)
 
-            time.sleep(1)
+        self.dnf_dianzan_op("投票3次领取（988964）", "860336")
 
-            # 投票后，有一定比例的浏览
-            if random.random() < 0.25:
-                self.dnf_dianzan_op(f"{desc} 浏览量+1", "812352", iType=mod_type, iWork=work_info.iInfoId)
-
-            time.sleep(1)
-            logger.info("")
-
-        self.dnf_dianzan_op("投票礼包", "812839")
-
-    def query_dnf_dianzan(self):
-        res = self.dnf_dianzan_op("查询点赞信息", "725348", print_res=False)
-        info = parse_amesvr_common_info(res)
-
-        return int(info.sOutValue1), info.sOutValue2
+        _, voteTimes, drawTimes = query_info()
+        remaining_draw_times = voteTimes - drawTimes
+        logger.info(f"累计获得抽奖资格：{voteTimes}次，剩余抽奖次数：{remaining_draw_times}")
+        for idx in range_from_one(remaining_draw_times):
+            self.dnf_dianzan_op(f"{idx}/{remaining_draw_times} 转盘（988974）", "860346")
+            time.sleep(5)
 
     def check_dnf_dianzan(self):
         self.check_bind_account(
             "DNF共创投票",
             get_act_url("DNF共创投票"),
             activity_op_func=self.dnf_dianzan_op,
-            query_bind_flowid="811640",
-            commit_bind_flowid="811639",
+            query_bind_flowid="860273",
+            commit_bind_flowid="860272",
         )
 
     def dnf_dianzan_op(self, ctx, iFlowId, sContent="", print_res=True, **extra_params):
@@ -6107,6 +6322,12 @@ class DjcHelper:
     def old_version_dianzan(self):
         db = DianzanDB().load()
         account_db = DianzanDB().with_context(self.cfg.name).load()
+
+        def query_dnf_dianzan():
+            res = self.dnf_dianzan_op("查询点赞信息", "725348", print_res=False)
+            info = parse_amesvr_common_info(res)
+
+            return int(info.sOutValue1), info.sOutValue2
 
         # 投票
         def today_dianzan():
@@ -6203,7 +6424,7 @@ class DjcHelper:
             )
             return int(res["iRet"]) == 0
 
-        totalDianZanCount, _ = self.query_dnf_dianzan()
+        totalDianZanCount, _ = query_dnf_dianzan()
         if totalDianZanCount < 200:
             # 进行今天剩余的点赞操作
             today_dianzan()
@@ -6211,7 +6432,7 @@ class DjcHelper:
             logger.warning("累积投票已经超过200次，无需再投票")
 
         # 查询点赞信息
-        totalDianZanCount, rewardTakenInfo = self.query_dnf_dianzan()
+        totalDianZanCount, rewardTakenInfo = query_dnf_dianzan()
         logger.warning(color("fg_bold_yellow") + f"DNF共创投票活动当前已投票{totalDianZanCount}次，奖励领取状态为{rewardTakenInfo}")
 
         # 领取点赞奖励
@@ -6363,7 +6584,7 @@ class DjcHelper:
 
         logger.warning(color("fg_bold_yellow") + "这个是心悦的活动，不是小助手的剩余付费时长，具体查看方式请读一遍付费指引/付费指引.docx")
 
-    @try_except(return_val_on_except=0)
+    @try_except(return_val_on_except=0, show_exception_info=False)
     def query_gpoints(self):
         res = AmesvrCommonModRet().auto_update_config(
             self.xinyue_financing_op("查询G分", "409361", print_res=False)["modRet"]
@@ -6785,6 +7006,12 @@ class DjcHelper:
         )
 
     # --------------------------------------------DNF马杰洛的规划--------------------------------------------
+    # re: 变更时需要调整这些
+    # note: 查询马杰洛信息的id [查询引导石数量和资格消耗]
+    flowid_majieluo_query_info = "134230"
+    # note: 马杰洛过期时间，最近的活动查询到的信息里都不会给出，需要自己填入
+    majieluo_DownDate = "2022-07-14 00:00:00"
+
     @try_except()
     def majieluo(self):
         show_head_line("DNF马杰洛的规划")
@@ -6797,13 +7024,13 @@ class DjcHelper:
         self.check_majieluo()
 
         def query_info() -> MaJieLuoInfo:
-            raw_res = self.majieluo_op("查询信息", "116819", print_res=False)
+            raw_res = self.majieluo_op("查询信息", self.flowid_majieluo_query_info, print_res=False)
 
             return MaJieLuoInfo().auto_update_config(raw_res["jData"])
 
         # 马杰洛的见面礼
         def take_gift(take_lottery_count_role_info: RoleInfo) -> bool:
-            self.majieluo_op("领取见面礼", "116809")
+            self.majieluo_op("领取见面礼", "134223")
             return True
 
         logger.info(f"当前马杰洛尝试使用回归角色领取见面礼的开关状态为：{self.cfg.enable_majieluo_lucky}")
@@ -6813,15 +7040,27 @@ class DjcHelper:
             take_gift(self.get_dnf_bind_role_copy())
 
         # 马杰洛的特殊任务
-        self.majieluo_op("每日登录礼包", "116810")
-        self.majieluo_op("每日通关史诗之路礼包", "116813")
+        self.majieluo_op("选择阵营", "134229", iType=2)
 
-        # 抽奖
-        info = query_info()
-        lottery_times = int(info.iDraw)
-        logger.info(color("bold_cyan") + f"当前抽奖次数为 {lottery_times}")
-        for idx in range_from_one(lottery_times):
-            self.majieluo_op(f"{idx}/{lottery_times} 幸运抽奖", "116816")
+        tasks = [
+            ("每日登录礼包", "134224"),
+            ("每日通关礼包", "134227"),
+            ("每日在线礼包", "134241"),
+            ("累计邀请10人", "134254"),
+            ("累计登录10天", "134252"),
+            ("累计登录20天", "134253"),
+            ("累计邀请20人", "134255"),
+        ]
+        for name, flowid in tasks:
+            self.majieluo_op(name, flowid)
+            time.sleep(5)
+
+        # # 抽奖
+        # info = query_info()
+        # lottery_times = int(info.iDraw)
+        # logger.info(color("bold_cyan") + f"当前抽奖次数为 {lottery_times}")
+        # for idx in range_from_one(lottery_times):
+        #     self.majieluo_op(f"{idx}/{lottery_times} 幸运抽奖", "131560")
 
         # 赠送礼盒
         self.majieluo_permit_social()
@@ -6852,22 +7091,43 @@ class DjcHelper:
         logger.info(color("bold_green") + f"当前已累计赠送{self.query_invite_count()}次")
 
         # self.majieluo_op("累计赠送30次礼包", "113887")
-        #
-        # # 提取得福利
-        # stoneCount = self.query_stone_count()
-        # logger.warning(color("bold_yellow") + f"当前共有{stoneCount}个引导石")
+        # self.majieluo_op("冲顶25", "134256")
+        # self.majieluo_op("冲顶40", "134257")
+        # self.majieluo_op("冲顶65", "134258")
+        # self.majieluo_op("冲顶75", "134259")
+
+        # 提取得福利
+        stoneCount = self.query_stone_count()
+        logger.warning(color("bold_yellow") + f"当前共有{stoneCount}个引导石")
 
         act_info = self.majieluo_op("获取活动信息", "", get_act_info_only=True)
         sDownDate = act_info.dev.action.sDownDate
         if sDownDate == not_know_end_time____:
-            # re: 如果活动配置表未配置dev字段，则需要手动设置过期时间，确保后续流程执行正常
-            sDownDate = "2022-02-16 00:00:00"
+            sDownDate = self.majieluo_DownDate
         endTime = get_today(parse_time(sDownDate))
 
         if get_today() == endTime:
-            # 最后一天再领取仅可领取单次的奖励
-            self.majieluo_op("福气礼包", "116817")
-            self.majieluo_op("幸运礼包", "116818")
+            # # 最后一天再领取仅可领取单次的奖励
+            # self.majieluo_op("晶体礼包", "131561")
+
+            act_url = get_act_url("DNF马杰洛的规划")
+            async_message_box(
+                "本次马杰洛奖励是兑换或者抽奖，所以本次不会自动兑换。今天已是活动最后一天，请自行到活动页面去兑换想要的奖励，或者抽奖",
+                f"手动兑换通知-{act_url}",
+                open_url=act_url,
+            )
+            # self.majieluo_op("幸运抽奖", "134228")
+            #
+            # self.majieluo_op("兑换灿烂的徽章1次", "134242")
+            # self.majieluo_op("兑换黑钻1次", "134244")
+            # self.majieluo_op("兑换异界气息净化书1次", "134245")
+            # self.majieluo_op("兑换装备提升礼盒2次", "134246")
+            # self.majieluo_op("兑换材质转换器2次", "134247")
+            # self.majieluo_op("兑换神器守护珠礼盒2次", "134248")
+            # self.majieluo_op("兑换雷米援助礼盒3次", "134249")
+            # self.majieluo_op("兑换复活币礼盒10次", "134250")
+        else:
+            logger.warning(f"当前不是活动最后一天({endTime})，将不会尝试领取 最终大奖")
 
         # takeStone = False
         # takeStoneFlowId = "113898"
@@ -6898,8 +7158,9 @@ class DjcHelper:
         self.majieluo_permit_social()
 
         results = []
+        iType = 0  # 0 赠送 1 索要
         for openid in xiaohao_qq_list:
-            res = self.majieluo_op(f"赠送单个用户（发送好友ark消息）-{openid}", "113966", openid=openid, p_skey=p_skey)
+            res = self.majieluo_op(f"赠送单个用户（发送好友ark消息）-{openid}", "134231", openid=openid, iType=iType, p_skey=p_skey)
             if int(res["iRet"]) == 0:
                 results.append("赠送成功")
             else:
@@ -6911,49 +7172,28 @@ class DjcHelper:
     def majieluo_open_box(self, scode: str) -> tuple[int, str]:
         self.majieluo_permit_social()
 
-        raw_res = self.majieluo_op(f"接受好友赠送礼盒 - {scode}", "116801", sCode=scode)
+        raw_res = self.majieluo_op(f"接受好友赠送礼盒 - {scode}", "134216", sCode=scode)
         return raw_res["iRet"], raw_res["sMsg"]
 
     @try_except(return_val_on_except=0, show_exception_info=False)
     def query_invite_count(self) -> int:
-        res = self.majieluo_op("查询邀请数目", "116819", print_res=False)
+        res = self.majieluo_op("查询邀请数目", self.flowid_majieluo_query_info, print_res=False)
 
         return len(res["jData"]["iSend"])
 
     @try_except(return_val_on_except=0, show_exception_info=False)
     def query_stone_count(self):
-        res = self.majieluo_op("查询当前时间引导石数量", "116821", print_res=False)
+        res = self.majieluo_op("查询当前时间引导石数量", "134232", print_res=False)
 
-        return int(res["jData"]["iStones"])
+        return int(res["jData"]["iFuqi"])
 
     def check_majieluo(self, **extra_params):
-        # re: 周末参考ams的绑定流程，改成通用的机制
-        self.majieluo_permit_social()
-
-        bind_config = self.majieluo_op("查询活动信息", "", get_act_info_only=True).get_bind_config()
-
-        query_bind_res = self.majieluo_op("查询绑定", bind_config.query_map_id, print_res=False)
-        if query_bind_res["jData"]["bindarea"] is not None:
-            return
-
-        if "dnf" not in self.bizcode_2_bind_role_map:
-            return
-
-        # 若道聚城已绑定dnf角色，则尝试绑定这个角色
-        roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
-        checkInfo = self.get_dnf_roleinfo(roleinfo)
-        role_extra_info = self.query_dnf_role_info_by_serverid_and_roleid(roleinfo.serviceID, roleinfo.roleCode)
-
-        self.majieluo_op(
-            "提交绑定",
-            bind_config.bind_map_id,
-            sRoleId=roleinfo.roleCode,
-            sRoleName=triple_quote(roleinfo.roleName),
-            sArea=roleinfo.serviceID,
-            sMd5str=checkInfo.md5str,
-            sCheckparam=quote_plus(checkInfo.checkparam),
-            roleJob=role_extra_info.forceid,
-            sAreaName=triple_quote(roleinfo.serviceName),
+        return self.ide_check_bind_account(
+            "DNF马杰洛的规划",
+            get_act_url("DNF马杰洛的规划"),
+            activity_op_func=self.majieluo_op,
+            sAuthInfo="MJL",
+            sActivityInfo="MJL13",
         )
 
     def majieluo_op(
@@ -7006,21 +7246,26 @@ class DjcHelper:
 
         @try_except(return_val_on_except=0)
         def query_info() -> MoJieRenInfo:
+            wait_for("查询信息", 5)
             raw_res = self.mojieren_op("查询信息", "116512", print_res=False)
 
             return MoJieRenInfo().auto_update_config(raw_res["jData"])
-
-        self.dnf_social_relation_permission_op("更新创建用户授权信息", "108939", sAuthInfo="SJTZ", sActivityInfo="SJTZ")
 
         self.check_mojieren()
 
         self.mojieren_op("获取魔方（每日登录）", "115862")
         self.mojieren_op("幸运勇士魔方", "116434")
 
-        self.mojieren_op("开始探险", "115979")
+        for _ in range(10):
+            info = query_info()
+            logger.info(color("bold_green") + f"当前位于 第 {info.iCurrRound} 轮 {info.iCurrPos} 格，剩余探索次数为 {info.cubeNum}")
+            if int(info.cubeNum) <= 0:
+                break
 
-        # self.mojieren_op("更换当前任务", "116292")
-        self.mojieren_op("完成任务", "116293")
+            self.mojieren_op("开始探险", "115979", startPos=info.iCurrPos)
+
+            # self.mojieren_op("更换当前任务", "116292")
+            self.mojieren_op("尝试完成任务", "116293")
 
         info = query_info()
 
@@ -7029,6 +7274,7 @@ class DjcHelper:
         for idx in range_from_one(lottery_times):
             self.mojieren_op(f"{idx}/{lottery_times} 奇兵夺宝", "116435")
 
+        logger.info(color("bold_cyan") + f"当前累计完成 {info.iCurrRound} 轮冒险， {info.iExploreTimes} 次探险")
         accumulative_award_info = [
             ("116436", "累计完成1轮冒险", info.hold.round1.iLeftNum, int(info.iCurrRound), 1),
             ("116437", "累计完成2轮冒险", info.hold.round2.iLeftNum, int(info.iCurrRound), 2),
@@ -7037,9 +7283,8 @@ class DjcHelper:
         ]
 
         for flowid, name, iLeftNum, current_val, bounds_val in accumulative_award_info:
-            if iLeftNum < 1:
-                continue
-            if current_val <= bounds_val:
+            if iLeftNum < 1 or current_val <= bounds_val:
+                logger.warning(f"{name} 条件不满足，当前进度为 {current_val}，剩余领取次数为 {iLeftNum}，需要进度大于 {bounds_val}且有剩余领取次数，将跳过")
                 continue
 
             self.mojieren_op(name, flowid)
@@ -7050,30 +7295,12 @@ class DjcHelper:
         # self.mojieren_op("接受邀请", "115853")
 
     def check_mojieren(self, **extra_params):
-        bind_config = self.mojieren_op("查询活动信息", "", get_act_info_only=True).get_bind_config()
-
-        query_bind_res = self.mojieren_op("查询绑定", bind_config.query_map_id, print_res=False)
-        if query_bind_res["jData"]["bindarea"] is not None:
-            return
-
-        if "dnf" not in self.bizcode_2_bind_role_map:
-            return
-
-        # 若道聚城已绑定dnf角色，则尝试绑定这个角色
-        roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
-        checkInfo = self.get_dnf_roleinfo(roleinfo)
-        role_extra_info = self.query_dnf_role_info_by_serverid_and_roleid(roleinfo.serviceID, roleinfo.roleCode)
-
-        self.mojieren_op(
-            "提交绑定",
-            bind_config.bind_map_id,
-            sRoleId=roleinfo.roleCode,
-            sRoleName=triple_quote(roleinfo.roleName),
-            sArea=roleinfo.serviceID,
-            sMd5str=checkInfo.md5str,
-            sCheckparam=quote_plus(checkInfo.checkparam),
-            roleJob=role_extra_info.forceid,
-            sAreaName=triple_quote(roleinfo.serviceName),
+        return self.ide_check_bind_account(
+            "魔界人探险记",
+            get_act_url("魔界人探险记"),
+            activity_op_func=self.mojieren_op,
+            sAuthInfo="SJTZ",
+            sActivityInfo="SJTZ",
         )
 
     def mojieren_op(
@@ -7111,6 +7338,112 @@ class DjcHelper:
             giftNum=giftNum,
             **extra_params,
             extra_cookies=f"p_skey={p_skey}",
+        )
+
+    # --------------------------------------------我的小屋--------------------------------------------
+    @try_except()
+    def dnf_my_home(self):
+        # note: 对接新版活动时，记得前往 urls.py 调整活动时间
+        show_head_line("我的小屋")
+        self.show_idesvr_act_info(self.dnf_my_home_op)
+
+        if not self.cfg.function_switches.get_dnf_my_home or self.disable_most_activities():
+            logger.warning("未启用领取我的小屋活动功能，将跳过")
+            return
+
+        self.check_dnf_my_home()
+
+        def query_gifts() -> list[MyHomeGift]:
+            raw_res = self.dnf_my_home_op("获取本身小屋宝箱道具", "132338", print_res=False)
+            gifts = MyHomeGiftList().auto_update_config(raw_res)
+
+            return gifts.jData
+
+        # 初始化
+        self.dnf_my_home_op("更新访问日期", "133320")
+        self.dnf_my_home_op("开通小屋", "132689")
+        self.dnf_my_home_op("刷新宝箱道具", "132469")
+
+        # 每日任务
+        tasks = [
+            ("每日登录游戏", "130906"),
+            ("在线30分钟", "131009"),
+            ("分享礼包", "131017"),
+            ("通关任意副本", "131018"),
+            ("消耗疲劳值礼包", "131033"),
+        ]
+        for name, flowid in tasks:
+            self.dnf_my_home_op(name, flowid)
+            time.sleep(5)
+
+        current_points = self.my_home_query_integral()
+        logger.info(color("bold_yellow") + f"当前积分为 {current_points}")
+
+        # 邀请好友
+        async_message_box("邀请好友可以额外获得一些积分，如果有需要，请自行完成", "我的小屋-邀请好友任务", show_once=True, open_url=get_act_url("我的小屋"))
+        # self.dnf_my_home_op("邀请好友", "131806")
+        # self.dnf_my_home_op("接受邀请", "131838")
+        # self.dnf_my_home_op("好友小屋列表", "131196")
+        # self.dnf_my_home_op("好友邀请列表", "131338")
+        # self.dnf_my_home_op("好友小屋道具信息", "132038")
+
+        #  兑换道具
+        logger.info("今日的宝箱如下:")
+        for gift in query_gifts():
+            logger.info(f"{gift.sPropName}\t{gift.iPoints} 积分")
+
+            price = int(gift.iPoints)
+            price_after_discount = int(int(gift.iPoints) * int(gift.discount) / 100)
+            if price > 1000 and current_points >= price_after_discount:
+                async_message_box(
+                    f"今日宝箱中包含稀有道具: {gift.sPropName}，需要积分为 {price_after_discount}，而 {self.cfg.name} 当前拥有积分为 {current_points}，足够兑换该道具了。如果需要兑换，请使用手机打开稍后的网页，自行兑换~",
+                    "我的小屋兑换提示",
+                    open_url=get_act_url("我的小屋"),
+                )
+
+        lastday = get_today(parse_time("2022-07-15 00:00:00"))
+        if is_weekly_first_run("我的小屋每周兑换提醒") or get_today() == lastday:
+            async_message_box(
+                "我的小屋活动的兑换选项较多，所以请自行前往网页（手机打开）按需兑换（可以看看自己或者好友的小屋的宝箱，选择需要的东西进行兑换",
+                "我的小屋兑换提醒-每周一次或最后一天",
+                open_url=get_act_url("我的小屋"),
+            )
+        # self.dnf_my_home_op("兑换本身小屋道具", "132421")
+        # self.dnf_my_home_op("兑换他人小屋道具", "132449")
+        # self.dnf_my_home_op("兑换终极道具", "132491")
+
+    @try_except(return_val_on_except=0, show_exception_info=False)
+    def my_home_query_integral(self) -> int:
+        raw_res = self.dnf_my_home_op("个人信息", "132493", print_res=False)
+
+        return int(raw_res["jData"]["iIntegral"])
+
+    def check_dnf_my_home(self, **extra_params):
+        return self.ide_check_bind_account(
+            "我的小屋",
+            get_act_url("我的小屋"),
+            activity_op_func=self.dnf_my_home_op,
+            sAuthInfo="",
+            sActivityInfo="",
+        )
+
+    def dnf_my_home_op(
+        self,
+        ctx: str,
+        iFlowId: str,
+        print_res=True,
+        **extra_params,
+    ):
+        iActivityId = self.urls.ide_iActivityId_dnf_my_home
+
+        return self.ide_request(
+            ctx,
+            "comm.ams.game.qq.com",
+            iActivityId,
+            iFlowId,
+            print_res,
+            get_act_url("我的小屋"),
+            **extra_params,
         )
 
     # --------------------------------------------新版活动统一社交权限接口--------------------------------------------
@@ -7277,19 +7610,49 @@ class DjcHelper:
             logger.warning("未启用领取dnf官方论坛签到活动合集功能，将跳过")
             return
 
-        if self.cfg.dnf_bbs_cookie == "" or self.cfg.dnf_bbs_formhash == "":
-            logger.warning("未配置dnf官方论坛的cookie或formhash，将跳过（dnf官方论坛相关的配置会配置就配置，不会就不要配置，我不会回答关于这俩如何获取的问题）")
+        if self.cfg.dnf_bbs_cookie == "":
+            logger.warning("未配置dnf官方论坛的cookie，将跳过（dnf官方论坛相关的配置会配置就配置，不会就不要配置，我不会回答关于这俩如何获取的问题）")
             return
 
-        self.check_dnf_bbs_v1()
+        # self.check_dnf_bbs_v1()
+        #
+        # self.check_dnf_bbs_v2()
 
-        self.check_dnf_bbs_v2()
+        def query_formhash() -> str:
+            if self.cfg.dnf_bbs_cookie == "":
+                return ""
+
+            # note: 鉴于兑换活动会存在真空期，改用解析个人中心的方式来获取论坛代币数目
+            url = self.urls.dnf_bbs_home
+            headers = {
+                "cookie": self.cfg.dnf_bbs_cookie,
+            }
+
+            res = requests.get(url, headers=headers, timeout=10)
+            html_text = res.text
+
+            # <a class="logout" href="member.php?mod=logging&amp;action=logout&amp;formhash=02d1xxxx">退出登陆</a>
+            prefix = "formhash="
+            suffix = '">退出登陆</a>'
+            if prefix not in html_text:
+                logger.warning("未能定位到论坛formhash")
+                return ""
+
+            prefix_idx = html_text.index(prefix) + len(prefix)
+            suffix_idx = html_text.index(suffix, prefix_idx)
+
+            formhash = html_text[prefix_idx:suffix_idx]
+
+            return formhash
 
         def signin():
             retryCfg = self.common_cfg.retry
             for idx in range(retryCfg.max_retry_count):
                 try:
-                    url = self.urls.dnf_bbs_signin.format(formhash=self.cfg.dnf_bbs_formhash)
+                    formhash = query_formhash()
+                    logger.info(f"查询到的formhash为: {formhash}")
+
+                    url = self.urls.dnf_bbs_signin.format(formhash=formhash)
                     headers = {
                         "cookie": self.cfg.dnf_bbs_cookie,
                         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
@@ -7329,7 +7692,7 @@ class DjcHelper:
                     logger.debug(f"不在预期内的签到返回内容如下：\n{html_text}")
 
                     async_message_box(
-                        f"{self.cfg.name} 的 官方论坛cookie和formhash似乎过期了，记得更新新的cookie和formhash~（可参照config.example.toml中这两个字段的注释操作）。如果不想继续签到了，可以不填论坛的cookie，就不会继续弹窗提示了",
+                        f"{self.cfg.name} 的 官方论坛cookie似乎过期了，记得更新最新的cookie~（可参照config.example.toml中这个字段的注释操作，打开后搜索 dnf_bbs_cookie）。如果不想继续签到了，可以不填论坛的cookie，就不会继续弹窗提示了",
                         "cookie似乎过期",
                     )
 
@@ -7343,41 +7706,43 @@ class DjcHelper:
         # https://dnf.qq.com/cp/a20211130act/index.html
         @try_except()
         def query_remaining_quota():
-            _query_quota_version_one(
-                "9-12月",
-                self.dnf_bbs_op_v2,
-                "788271",
-                [
-                    "一次性材质转换器",
-                    "一次性继承装置",
-                    "华丽的徽章神秘礼盒",
-                    "装备提升礼盒",
-                    "华丽的徽章自选礼盒",
-                    "抗疲劳秘药 (30点)",
-                    "Lv100传说装备自选礼盒",
-                    "异界气息净化书",
-                    "灿烂的徽章神秘礼盒",
-                    "灿烂的徽章自选礼盒",
-                ],
-            )
+            # _query_quota_version_one(
+            #     "9-12月",
+            #     self.dnf_bbs_op_v2,
+            #     "788271",
+            #     [
+            #         "一次性材质转换器",
+            #         "一次性继承装置",
+            #         "华丽的徽章神秘礼盒",
+            #         "装备提升礼盒",
+            #         "华丽的徽章自选礼盒",
+            #         "抗疲劳秘药 (30点)",
+            #         "Lv100传说装备自选礼盒",
+            #         "异界气息净化书",
+            #         "灿烂的徽章神秘礼盒",
+            #         "灿烂的徽章自选礼盒",
+            #     ],
+            # )
+            #
+            # _query_quota_version_one(
+            #     "12-3月",
+            #     self.dnf_bbs_op_v1,
+            #     "821339",
+            #     [
+            #         "一次性材质转换器",
+            #         "一次性继承装置",
+            #         "装备提升礼盒",
+            #         "灵魂武器袖珍罐",
+            #         "华丽的徽章神秘礼盒",
+            #         "华丽的徽章自选礼盒",
+            #         "Lv100传说装备自选礼盒",
+            #         "纯净的增幅书",
+            #         "灿烂的徽章神秘礼盒",
+            #         "灿烂的徽章自选礼盒",
+            #     ],
+            # )
 
-            _query_quota_version_one(
-                "12-3月",
-                self.dnf_bbs_op_v1,
-                "821339",
-                [
-                    "一次性材质转换器",
-                    "一次性继承装置",
-                    "装备提升礼盒",
-                    "灵魂武器袖珍罐",
-                    "华丽的徽章神秘礼盒",
-                    "华丽的徽章自选礼盒",
-                    "Lv100传说装备自选礼盒",
-                    "纯净的增幅书",
-                    "灿烂的徽章神秘礼盒",
-                    "灿烂的徽章自选礼盒",
-                ],
-            )
+            pass
 
         @try_except()
         def _query_quota_version_one(ctx: str, op_func: Callable[..., dict], flow_id: str, item_name_list: list[str]):
@@ -7426,26 +7791,26 @@ class DjcHelper:
         @try_except()
         def try_exchange():
             operations = [
-                ("10", "788270", 1, "灿烂的徽章自选礼盒【50代币券】", self.dnf_bbs_op_v2),
-                ("10", "821327", 1, "灿烂的徽章自选礼盒【50代币券】", self.dnf_bbs_op_v1),
-                ("9", "788270", 1, "灿烂的徽章神秘礼盒【25代币券】", self.dnf_bbs_op_v2),
-                ("9", "821327", 1, "灿烂的徽章神秘礼盒【25代币券】", self.dnf_bbs_op_v1),
-                ("4", "788270", 5, "装备提升礼盒【2代币券】", self.dnf_bbs_op_v2),
-                ("8", "821327", 1, "纯净的增幅书【25代币券】", self.dnf_bbs_op_v1),
-                ("3", "821327", 5, "装备提升礼盒【2代币券】", self.dnf_bbs_op_v1),
-                ("1", "788270", 5, "一次性材质转换器【2代币券】", self.dnf_bbs_op_v2),
-                ("1", "821327", 5, "一次性材质转换器【2代币券】", self.dnf_bbs_op_v1),
-                ("2", "788270", 5, "一次性继承装置【2代币券】", self.dnf_bbs_op_v2),
-                ("2", "821327", 5, "一次性继承装置【2代币券】", self.dnf_bbs_op_v1),
-                ("5", "788270", 2, "华丽的徽章自选礼盒【12代币券】", self.dnf_bbs_op_v2),
-                ("6", "821327", 2, "华丽的徽章自选礼盒【12代币券】", self.dnf_bbs_op_v1),
-                ("3", "788270", 5, "华丽的徽章神秘礼盒【2代币券】", self.dnf_bbs_op_v2),
-                ("5", "821327", 2, "华丽的徽章神秘礼盒【5代币券】", self.dnf_bbs_op_v1),
-                ("7", "788270", 1, "Lv100传说装备自选礼盒【12代币券】", self.dnf_bbs_op_v2),
-                ("7", "821327", 1, "Lv100传说装备自选礼盒【12代币券】", self.dnf_bbs_op_v1),
-                ("8", "788270", 1, "异界气息净化书【25代币券】", self.dnf_bbs_op_v2),
-                ("6", "788270", 1, "抗疲劳秘药 (30点)【12代币券】", self.dnf_bbs_op_v2),
-                ("4", "821327", 1, "灵魂武器袖珍罐【12代币券】", self.dnf_bbs_op_v1),
+                # ("10", "788270", 1, "灿烂的徽章自选礼盒【50代币券】", self.dnf_bbs_op_v2),
+                # ("10", "821327", 1, "灿烂的徽章自选礼盒【50代币券】", self.dnf_bbs_op_v1),
+                # ("9", "788270", 1, "灿烂的徽章神秘礼盒【25代币券】", self.dnf_bbs_op_v2),
+                # ("9", "821327", 1, "灿烂的徽章神秘礼盒【25代币券】", self.dnf_bbs_op_v1),
+                # ("4", "788270", 5, "装备提升礼盒【2代币券】", self.dnf_bbs_op_v2),
+                # ("8", "821327", 1, "纯净的增幅书【25代币券】", self.dnf_bbs_op_v1),
+                # ("3", "821327", 5, "装备提升礼盒【2代币券】", self.dnf_bbs_op_v1),
+                # ("1", "788270", 5, "一次性材质转换器【2代币券】", self.dnf_bbs_op_v2),
+                # ("1", "821327", 5, "一次性材质转换器【2代币券】", self.dnf_bbs_op_v1),
+                # ("2", "788270", 5, "一次性继承装置【2代币券】", self.dnf_bbs_op_v2),
+                # ("2", "821327", 5, "一次性继承装置【2代币券】", self.dnf_bbs_op_v1),
+                # ("5", "788270", 2, "华丽的徽章自选礼盒【12代币券】", self.dnf_bbs_op_v2),
+                # ("6", "821327", 2, "华丽的徽章自选礼盒【12代币券】", self.dnf_bbs_op_v1),
+                # ("3", "788270", 5, "华丽的徽章神秘礼盒【2代币券】", self.dnf_bbs_op_v2),
+                # ("5", "821327", 2, "华丽的徽章神秘礼盒【5代币券】", self.dnf_bbs_op_v1),
+                # ("7", "788270", 1, "Lv100传说装备自选礼盒【12代币券】", self.dnf_bbs_op_v2),
+                # ("7", "821327", 1, "Lv100传说装备自选礼盒【12代币券】", self.dnf_bbs_op_v1),
+                # ("8", "788270", 1, "异界气息净化书【25代币券】", self.dnf_bbs_op_v2),
+                # ("6", "788270", 1, "抗疲劳秘药 (30点)【12代币券】", self.dnf_bbs_op_v2),
+                # ("4", "821327", 1, "灵魂武器袖珍罐【12代币券】", self.dnf_bbs_op_v1),
             ]
 
             for index_str, flowid, count, name, op_func in operations:
@@ -7496,14 +7861,31 @@ class DjcHelper:
 
     @try_except(show_exception_info=False, return_val_on_except=0)
     def query_dnf_bbs_dbq(self) -> int:
-        if self.cfg.dnf_bbs_cookie == "" or self.cfg.dnf_bbs_formhash == "":
+        if self.cfg.dnf_bbs_cookie == "":
             return 0
 
-        # re: 切换版本时需要修改这个值
-        latest_op_query_flowid = "821339"
-        res = self.dnf_bbs_op("查询代币券", latest_op_query_flowid, print_res=False)
-        info = parse_amesvr_common_info(res)
-        return int(info.sOutValue1)
+        # note: 鉴于兑换活动会存在真空期，改用解析个人中心的方式来获取论坛代币数目
+        url = self.urls.dnf_bbs_home
+        headers = {
+            "cookie": self.cfg.dnf_bbs_cookie,
+        }
+
+        res = requests.get(url, headers=headers, timeout=10)
+        html_text = res.text
+
+        # <li><em> 论坛代币: </em>17 </li>
+        prefix = "论坛代币: </em>"
+        suffix = "</li>"
+        if prefix not in html_text:
+            logger.warning("未能定位到论坛代币数目")
+            return 0
+
+        prefix_idx = html_text.index(prefix) + len(prefix)
+        suffix_idx = html_text.index(suffix, prefix_idx)
+
+        coin = int(html_text[prefix_idx:suffix_idx])
+
+        return coin
 
     @try_except()
     def check_dnf_bbs_v1(self):
@@ -7663,9 +8045,11 @@ class DjcHelper:
             if need_show_message_box:
                 async_message_box(msg, title, open_url="https://bbs.colg.cn/forum-171-1.html", print_log=False)
 
-        logger.info(color("bold_cyan") + "除签到外的任务条件，以及各个奖励的领取，请自己前往colg进行嗷")
-
-        logger.info(color("bold_cyan") + "colg社区活跃任务右侧有个【前往商城】，请自行完成相关活动后点进去自行兑换奖品")
+        async_message_box(
+            ("除签到外的任务条件，以及各个奖励的领取，请自己前往colg进行嗷\n" "\n" "此外colg社区活跃任务右侧有个【前往商城】，请自行完成相关活动后点进去自行兑换奖品"),
+            f"colg社区活跃任务-{info.activity_id}-提示",
+            show_once=True,
+        )
 
     # --------------------------------------------小酱油周礼包和生日礼包--------------------------------------------
     @try_except()
@@ -7897,33 +8281,34 @@ class DjcHelper:
 
             return int(raw_info.sOutValue5) == 1
 
-        self.dnf_luodiye_op("每日登录游戏", "831481")
-        # 这个需要切换角色，但是实在没有必要，就不弄了
-        self.dnf_luodiye_op("创建合金战士角色", "831483")
-        self.dnf_luodiye_op("通关异界地下城", "831509")
-        self.dnf_luodiye_op("浏览活动集合页", "831511")
+        # ------------ 实际流程 --------------
 
-        if not self.cfg.function_switches.disable_share and is_first_run(
-            f"dnf_luodiye_分享_{self.uin()}_{get_act_url('DNF落地页活动')}"
-        ):
-            self.dnf_luodiye_op("用户授权(统一授权)", "831516")
-            self.dnf_luodiye_op("分享", "831522", sUin=self.qq(), p_skey=self.fetch_share_p_skey("领取分享奖励"))
+        self.dnf_luodiye_op("答问卷，并领奖", "860904", answer1=1, answer2=3, answer3=5)
 
-        self.dnf_luodiye_op("分享指定QQ好友", "831507")
+        # if not self.cfg.function_switches.disable_share and is_first_run(
+        #     f"dnf_luodiye_分享_{self.uin()}_{get_act_url('DNF落地页活动')}"
+        # ):
+        #     self.dnf_luodiye_op("用户授权(统一授权)", "844965")
+        #     self.dnf_luodiye_op("分享", "844972", sUin=self.qq(), p_skey=self.fetch_share_p_skey("领取分享奖励"))
+        #
+        # self.dnf_luodiye_op("登录游戏积分", "844938")
+        # self.dnf_luodiye_op("分享好友积分", "844952")
+        # self.dnf_luodiye_op("登录游戏顾问奖励", "844953")
+        # self.dnf_luodiye_op("分享好友店长奖励", "844959")
 
-        lottery_times = query_lottery_times()
-        logger.info(f"当前可抽卡次数为 {lottery_times}")
-        for idx in range_from_one(lottery_times):
-            self.dnf_luodiye_op(f"{idx}/{lottery_times} 抽取卡面", "831320")
-
-        if not already_duihuan():
-            self.dnf_luodiye_op("五虎卡面集齐奖励", "831322")
-        else:
-            self.dnf_luodiye_op("卡面抽奖", "831375", pointID="401")
-            self.dnf_luodiye_op("卡面抽奖", "831375", pointID="402")
-            self.dnf_luodiye_op("卡面抽奖", "831375", pointID="403")
-            self.dnf_luodiye_op("卡面抽奖", "831375", pointID="404")
-            self.dnf_luodiye_op("卡面抽奖", "831375", pointID="405")
+        # lottery_times = query_lottery_times()
+        # logger.info(f"当前可抽卡次数为 {lottery_times}")
+        # for idx in range_from_one(lottery_times):
+        #     self.dnf_luodiye_op(f"{idx}/{lottery_times} 抽取卡面", "831320")
+        #
+        # if not already_duihuan():
+        #     self.dnf_luodiye_op("五虎卡面集齐奖励", "831322")
+        # else:
+        #     self.dnf_luodiye_op("卡面抽奖", "831375", pointID="401")
+        #     self.dnf_luodiye_op("卡面抽奖", "831375", pointID="402")
+        #     self.dnf_luodiye_op("卡面抽奖", "831375", pointID="403")
+        #     self.dnf_luodiye_op("卡面抽奖", "831375", pointID="404")
+        #     self.dnf_luodiye_op("卡面抽奖", "831375", pointID="405")
 
         #
         # gift_list = [
@@ -7945,8 +8330,8 @@ class DjcHelper:
             "DNF落地页活动",
             get_act_url("DNF落地页活动"),
             activity_op_func=self.dnf_luodiye_op,
-            query_bind_flowid="831407",
-            commit_bind_flowid="831406",
+            query_bind_flowid="860901",
+            commit_bind_flowid="860900",
         )
 
     def dnf_luodiye_op(self, ctx, iFlowId, p_skey="", print_res=True, **extra_params):
@@ -7985,68 +8370,52 @@ class DjcHelper:
 
         self.check_dnf_wegame()
 
-        # @try_except(show_exception_info=False, return_val_on_except=0)
-        # def query_signin_days():
-        #     res = self.dnf_wegame_op("查询签到天数-condOutput", "800004", print_res=False)
-        #     return self.parse_condOutput(res, "a684eceee76fc522773286a895bc8436")
+        jifen_flowid = "864315"
 
-        def query_lottery_times():
-            res = self.dnf_wegame_op("查询抽奖次数-jifenOutput", "833323", print_res=False)
-            return self.parse_jifenOutput(res, "407")
+        def query_open_box_times():
+            res = self.dnf_wegame_op("查询开盒子次数-jifenOutput", jifen_flowid, print_res=False)
+            return self.parse_jifenOutput(res, "469")
 
         def query_daily_lottery_times():
-            res = self.dnf_wegame_op("查询抽奖次数-jifenOutput", "833323", print_res=False)
-            return self.parse_jifenOutput(res, "408")
+            res = self.dnf_wegame_op("查询每日抽奖次数-jifenOutput", jifen_flowid, print_res=False)
+            return self.parse_jifenOutput(res, "470")
 
-        self.dnf_wegame_op("全民见面礼", "833305")
+        # 全民礼包
+        self.dnf_wegame_op("全民庆生礼", "864175")
 
         # 四选一
-        self.dnf_wegame_op("创建合金战士获得补给箱", "833308")
-        self.dnf_wegame_op("在线30分钟获得补给箱", "833307")
-        self.dnf_wegame_op("页面签到获得补给箱", "833306")
+        self.dnf_wegame_op("每日登录游戏", "864306")
+        self.dnf_wegame_op("在线30分钟", "864307")
+        self.dnf_wegame_op("消除100疲劳值", "864308")
 
-        totalLotteryTimes, remainingLotteryTimes = query_lottery_times()
+        totalLotteryTimes, remainingLotteryTimes = query_open_box_times()
         logger.info(color("bold_yellow") + f"累计获得{totalLotteryTimes}次抽奖次数，目前剩余{remainingLotteryTimes}次抽奖次数")
-        for i in range(remainingLotteryTimes):
-            self.dnf_wegame_op(f"第{i + 1}次 开启补给箱-4礼包抽奖", "833650")
+        for idx in range_from_one(remainingLotteryTimes):
+            self.dnf_wegame_op(f"{idx}/{remainingLotteryTimes} 开启补给箱-4礼包抽奖", "865066")
 
-        # 达成游戏内容
-        def take_hejin_awards(role_info: RoleInfo):
-            self.dnf_wegame_op("创建合金战士获得补给箱", "833308")
-            self.dnf_wegame_op("LV1等级礼包", "833309")
-            self.dnf_wegame_op("LV50等级礼包", "833310")
-            self.dnf_wegame_op("LV90等级礼包", "833311")
-            self.dnf_wegame_op("LV95等级礼包", "833312")
-            self.dnf_wegame_op("LV100等级礼包", "833313")
-
-            return True
-
-        self.temporary_change_bind_and_do(
-            "尝试寻找当前绑定区服中的 合金战士 角色来进行领取升级活动奖励",
-            self.query_dnf_rolelist_for_temporary_change_bind(base_force_name="神枪手（男）"),
-            self.check_dnf_wegame,
-            take_hejin_awards,
-            need_try_func=None,
-        )
+        # 体验新副本
+        self.dnf_wegame_op("通关【国王摇篮】3次", "864302")
+        self.dnf_wegame_op("通关【毁坏的寂静】5次", "864303")
+        self.dnf_wegame_op("通关【贵族机要】8次", "864304")
+        self.dnf_wegame_op("Lv105装备20件", "864305")
 
         # 抽奖
-        self.dnf_wegame_op("登录游戏30min抽奖券", "833314")
-        self.dnf_wegame_op("通关异界获得抽奖券", "833315")
-        self.dnf_wegame_op("许愿房间停留5分钟获得抽奖券", "833316")
-        self.dnf_wegame_op("观看视频获得抽奖券", "833317")
+        self.dnf_wegame_op("分享按钮", "865372")
+        self.dnf_wegame_op("在线10分钟", "864311")
+        self.dnf_wegame_op("通关【昆法特】", "864312")
 
         totalLotteryTimes, remainingLotteryTimes = query_daily_lottery_times()
         logger.info(color("bold_yellow") + f"累计获得{totalLotteryTimes}次抽奖次数，目前剩余{remainingLotteryTimes}次抽奖次数")
-        for i in range(remainingLotteryTimes):
-            self.dnf_wegame_op(f"第{i + 1}次抽奖", "833318")
+        for idx in range_from_one(remainingLotteryTimes):
+            self.dnf_wegame_op(f"{idx}/{remainingLotteryTimes} 次抽奖", "865107")
 
     def check_dnf_wegame(self, roleinfo=None, roleinfo_source="道聚城所绑定的角色"):
         self.check_bind_account(
             "WeGame活动",
             get_act_url("WeGame活动"),
             activity_op_func=self.dnf_wegame_op,
-            query_bind_flowid="833300",
-            commit_bind_flowid="833299",
+            query_bind_flowid="864172",
+            commit_bind_flowid="864171",
             roleinfo=roleinfo,
             roleinfo_source=roleinfo_source,
         )
@@ -8236,6 +8605,47 @@ class DjcHelper:
             **extra_params,
         )
 
+    # --------------------------------------------冒险的起点--------------------------------------------
+    @try_except()
+    def maoxian_start(self):
+        show_head_line("冒险的起点")
+        self.show_amesvr_act_info(self.maoxian_start_op)
+
+        if not self.cfg.function_switches.get_maoxian_start or self.disable_most_activities():
+            logger.warning("未启用领取冒险的起点功能，将跳过")
+            return
+
+        self.maoxian_start_op("1", "860646")
+        self.maoxian_start_op("2", "860648")
+        self.maoxian_start_op("3", "860649")
+        self.maoxian_start_op("4", "860650")
+        self.maoxian_start_op("5", "860651")
+        self.maoxian_start_op("6", "860652")
+        self.maoxian_start_op("7", "860653")
+
+    def check_maoxian(self):
+        self.check_bind_account(
+            "冒险的起点",
+            get_act_url("冒险的起点"),
+            activity_op_func=self.maoxian_start_op,
+            query_bind_flowid="860643",
+            commit_bind_flowid="860642",
+        )
+
+    def maoxian_start_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_maoxian_start
+        return self.amesvr_request(
+            ctx,
+            "x6m5.ams.game.qq.com",
+            "group_3",
+            "dnf",
+            iActivityId,
+            iFlowId,
+            print_res,
+            get_act_url("冒险的起点"),
+            **extra_params,
+        )
+
     # --------------------------------------------勇士的冒险补给--------------------------------------------
     @try_except()
     def maoxian(self):
@@ -8246,73 +8656,27 @@ class DjcHelper:
             logger.warning("未启用领取勇士的冒险补给功能，将跳过")
             return
 
-        self.maoxian_op("第一天-时间引导石(20个)", "798455")
-        self.maoxian_op("第二天-时间引导石(20个)", "798457")
-        self.maoxian_op("第三天-升级券", "798458")
-        self.maoxian_op("第四天-升级券", "798459")
-        self.maoxian_op("第五天-高级材料礼盒", "798460")
-        self.maoxian_op("第六天-高级材料礼盒", "798461")
-        self.maoxian_op("第七天-时间引导石(100个)", "798462")
-
-    def check_maoxian(self):
-        self.check_bind_account(
-            "勇士的冒险补给",
-            get_act_url("勇士的冒险补给"),
-            activity_op_func=self.maoxian_op,
-            query_bind_flowid="798452",
-            commit_bind_flowid="798451",
-        )
-
-    def maoxian_op(self, ctx, iFlowId, print_res=True, **extra_params):
-        iActivityId = self.urls.iActivityId_maoxian
-        return self.amesvr_request(
-            ctx,
-            "x6m5.ams.game.qq.com",
-            "group_3",
-            "dnf",
-            iActivityId,
-            iFlowId,
-            print_res,
-            get_act_url("勇士的冒险补给"),
-            **extra_params,
-        )
-
-    # --------------------------------------------勇士的冒险补给--------------------------------------------
-    @try_except()
-    def maoxian_dup(self):
-        show_head_line("勇士的冒险补给")
-        self.show_amesvr_act_info(self.maoxian_dup_op)
-
-        if not self.cfg.function_switches.get_maoxian or self.disable_most_activities():
-            logger.warning("未启用领取勇士的冒险补给功能，将跳过")
-            return
-
         self.check_maoxian_dup()
 
-        self.maoxian_dup_op("邀请一位回归用户礼包", "797248")
-        self.maoxian_dup_op("邀请两位回归用户抽奖", "798383")
-        self.maoxian_dup_op("邀请三位回归用户抽奖", "798434")
+        self.maoxian_op("第一天回流", "863104")
+        self.maoxian_op("第二天回流", "863852")
+        self.maoxian_op("第三天回流", "863855")
+        self.maoxian_op("第四天回流", "863866")
+        self.maoxian_op("第五天回流", "863868")
 
-        self.maoxian_dup_op("回归玩家登录1次", "798441")
-        self.maoxian_dup_op("回归玩家登录2次", "798588")
-        self.maoxian_dup_op("回归玩家登录3次", "798590")
-        self.maoxian_dup_op("回归玩家登录4次", "798592")
-
-        self.maoxian_dup_op("冒险-在线15分钟", "798596")
-        self.maoxian_dup_op("冒险-在线30分钟", "798597")
-        self.maoxian_dup_op("冒险-通过地下城1次", "798598")
+        logger.warning("邀请回归及抽取对应获得的领奖次数，请自行完成")
 
     def check_maoxian_dup(self):
         self.check_bind_account(
             "勇士的冒险补给",
             get_act_url("勇士的冒险补给"),
-            activity_op_func=self.maoxian_dup_op,
-            query_bind_flowid="800024",
-            commit_bind_flowid="800023",
+            activity_op_func=self.maoxian_op,
+            query_bind_flowid="863845",
+            commit_bind_flowid="863844",
         )
 
-    def maoxian_dup_op(self, ctx, iFlowId, print_res=True, **extra_params):
-        iActivityId = self.urls.iActivityId_maoxian_dup
+    def maoxian_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_maoxian
 
         roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
         qq = self.qq()
@@ -8320,6 +8684,9 @@ class DjcHelper:
 
         res = self.amesvr_request(
             ctx,
+            # "x6m5.ams.game.qq.com",
+            # "group_3",
+            # "dnf",
             "comm.ams.game.qq.com",
             "group_k",
             "bb",
@@ -8418,35 +8785,28 @@ class DjcHelper:
         show_head_line("DNF周年庆登录活动")
         self.show_amesvr_act_info(self.dnf_anniversary_op)
 
-        if now_in_range("2021-06-19 06:00:00", "2021-06-21 05:59:59") and is_daily_first_run("DNF周年庆登录活动_提示登录"):
-            async_message_box("周年庆是否所有需要领奖励的号都已经登录了？如果没有的话，记得去一个个登录哦~", "周年庆登录")
-
-        if self.disable_most_activities():
-            logger.warning("未启用领取DNF周年庆登录活动功能，将跳过")
-            return
-
-        if not self.cfg.function_switches.get_dnf_anniversary:
+        if now_in_range("2022-06-18 06:00:00", "2022-06-20 05:59:59") and is_daily_first_run("DNF周年庆登录活动_提示登录"):
             async_message_box(
                 (
-                    "为了保持仪式感，默认不领取DNF周年庆登录活动功能，将跳过，如需自动领取，请打开该开关~\n"
-                    "另外请不要忘记在2021年6月19日06:00~2021年6月21日05:59期间至少登录一次游戏，否则将无法领取奖励~"
+                    "周年庆是否所有需要领奖励的号都已经登录了？如果没有的话，记得去一个个登录哦~\n"
+                    "\n"
+                    "此外在6.16到7.28期间，登录即可领一套透明天空<_<在游戏中的【从100开始的全新冒险】活动中点击领取\n"
                 ),
-                "周年庆提示",
-                show_once=True,
+                "周年庆登录",
+                open_url=get_act_url("DNF周年庆登录活动"),
             )
 
-            if now_in_range("2021-06-24 06:00:00", "2021-07-01 05:59:59") and is_daily_first_run("DNF周年庆登录活动_提示领奖"):
-                async_message_box("今天是否去周年庆网页领奖了吗~，不要忘记哦~", "提示领奖", open_url=get_act_url("DNF周年庆登录活动"))
-
+        if not self.cfg.function_switches.get_dnf_anniversary or self.disable_most_activities():
+            logger.warning("未启用领取DNF周年庆登录活动功能，将跳过")
             return
 
         self.check_dnf_anniversary()
 
         gifts = [
-            ("第一弹", "769503", "2021-06-24 16:00:00"),
-            ("第二弹", "769700", "2021-06-25 00:00:00"),
-            ("第三弹", "769718", "2021-06-26 00:00:00"),
-            ("第四弹", "769719", "2021-06-27 00:00:00"),
+            ("第一弹", "862311", "2022-06-23 16:00:00"),
+            ("第二弹", "862313", "2022-06-24 00:00:00"),
+            ("第三弹", "862314", "2022-06-25 00:00:00"),
+            ("第四弹", "862431", "2022-06-26 00:00:00"),
         ]
 
         now = get_now()
@@ -8461,8 +8821,8 @@ class DjcHelper:
             "DNF周年庆登录活动",
             get_act_url("DNF周年庆登录活动"),
             activity_op_func=self.dnf_anniversary_op,
-            query_bind_flowid="769502",
-            commit_bind_flowid="769501",
+            query_bind_flowid="861915",
+            commit_bind_flowid="861914",
         )
 
     def dnf_anniversary_op(self, ctx, iFlowId, print_res=True, **extra_params):
@@ -8667,27 +9027,26 @@ class DjcHelper:
         self.check_dnf_collection()
 
         def query_signin_days() -> int:
-            res = self.dnf_collection_op("查询签到天数-condOutput", "834267", print_res=False)
+            res = self.dnf_collection_op("查询签到天数-condOutput", "864509", print_res=False)
             return self.parse_condOutput(res, "a684eceee76fc522773286a895bc8436")
 
-        self.dnf_collection_op("领取幸运勇士礼包", "834255")
+        self.dnf_collection_op("全民参与礼包", "864497")
+        self.dnf_collection_op("回归玩家礼包", "864499")
 
-        self.dnf_collection_op("领取全民参与礼包", "834252")
-
-        self.dnf_collection_op("30分钟在线按钮", "834256")
+        self.dnf_collection_op("每日签到30分钟礼包按钮", "864500")
         logger.info(color("fg_bold_cyan") + f"当前已累积签到 {query_signin_days()} 天")
-        self.dnf_collection_op("累计登录3天按钮", "834257")
-        self.dnf_collection_op("累计登录7天按钮", "834258")
-        self.dnf_collection_op("累计登录15天按钮", "834259")
-        self.dnf_collection_op("累计登录21天按钮", "834260")
+
+        self.dnf_collection_op("累积签到3天礼包", "864501")
+        self.dnf_collection_op("累积签到7天礼包", "864502")
+        self.dnf_collection_op("累积签到15天礼包", "864503")
 
     def check_dnf_collection(self):
         self.check_bind_account(
             "DNF集合站",
             get_act_url("DNF集合站"),
             activity_op_func=self.dnf_collection_op,
-            query_bind_flowid="834249",
-            commit_bind_flowid="834248",
+            query_bind_flowid="864494",
+            commit_bind_flowid="864493",
         )
 
     def dnf_collection_op(self, ctx, iFlowId, print_res=True, **extra_params):
@@ -8768,37 +9127,48 @@ class DjcHelper:
 
         self.check_dnf_kol()
 
-        def query_lottery_times():
-            res = self.dnf_kol_op("jifenOutput", "808590", print_res=False)
-            return self.parse_jifenOutput(res, "364")
+        def query_energy() -> tuple[int, int]:
+            res = self.dnf_kol_op("查询信息", "862612", print_res=False)
+            raw_info = parse_amesvr_common_info(res)
 
-        self.dnf_kol_op("点击助力按钮", "808574")
-        self.dnf_kol_op("点击领取按钮", "808576")
+            total, left = raw_info.sOutValue1.split("|")
+            return int(total), int(left)
 
-        self.dnf_kol_op("助力任务-登录30分钟按钮", "808577")
-        self.dnf_kol_op("助力任务-裂缝注视者副本按钮", "808578")
-        self.dnf_kol_op("助力任务-消耗30疲劳按钮", "808579")
+        # 领取能量值
+        self.dnf_kol_op("账号为幸运回归玩家-回流（幸运）玩家主动领取", "863482")
+        self.dnf_kol_op("每日登录进入DNF游戏-每日登录", "859926")
+        self.dnf_kol_op("每日通关任意地下城3次", "860218")
+        self.dnf_kol_op("每日在线", "860216")
+        self.dnf_kol_op("每日完成游戏内任意一个任务", "860229")
 
-        self.dnf_kol_op("YYDS任务-通关命运抉择按钮", "808580")
+        for pilao in [50, 100]:
+            self.dnf_kol_op(f"每日消耗疲劳点-{pilao}点", "860221", countsInfo=pilao)
 
-        total, remaining = query_lottery_times()
-        logger.info(f"当前剩余抽奖次数为{remaining}，累积获得{total}")
-        for idx in range_from_one(remaining):
-            self.dnf_kol_op(f"第{idx}次抽奖", "808581")
+        total_energy, left_energy = query_energy()
+        logger.info(f"当前累计获得 {total_energy}，剩余票数 {left_energy}")
+        for energy in [20, 40, 80, 140, 280, 400]:
+            if total_energy >= energy:
+                self.dnf_kol_op(f"累积能力值领取礼包 - {energy}", "860366", power=energy)
+                time.sleep(5)
 
-        self.dnf_kol_op("签到助力-每日签到按钮", "808582")
-        self.dnf_kol_op("签到助力-累计3天按钮", "808583")
-        self.dnf_kol_op("签到助力-累计7天按钮", "808584")
-        self.dnf_kol_op("签到助力-累计10天按钮", "808585")
-        self.dnf_kol_op("签到助力-累计15天按钮", "808586")
+        # 邀请回归玩家
+        logger.warning("邀请幸运玩家的部分请自行玩家~")
+        # self.dnf_kol_op("累积邀请回归用户领取礼包", "861459", inviteNum=1)
+
+        # 能量收集站
+        logger.warning("没有大量邀请回归基本不可能领取到排行礼包，请自行完成~")
+        # self.dnf_kol_op("领取排行礼包", "863366")
+
+        # 投票
+        logger.warning("投票似乎没有奖励，同时为了避免影响原来的分布，请自行按照喜好投票给对应kol")
 
     def check_dnf_kol(self):
         self.check_bind_account(
             "KOL",
             get_act_url("KOL"),
             activity_op_func=self.dnf_kol_op,
-            query_bind_flowid="808571",
-            commit_bind_flowid="808570",
+            query_bind_flowid="859628",
+            commit_bind_flowid="859627",
         )
 
     def dnf_kol_op(self, ctx, iFlowId, print_res=True, **extra_params):
@@ -8811,7 +9181,7 @@ class DjcHelper:
             iActivityId,
             iFlowId,
             print_res,
-            "http://dnf.qq.com/lbact/a20211014kol2/zzx.html",
+            get_act_url("KOL"),
             **extra_params,
         )
 
@@ -9334,6 +9704,166 @@ class DjcHelper:
             **extra_params,
         )
 
+    # --------------------------------------------DNF互动站--------------------------------------------
+    @try_except()
+    def dnf_interactive(self):
+        show_head_line("DNF互动站")
+        self.show_amesvr_act_info(self.dnf_interactive_op)
+
+        if not self.cfg.function_switches.get_dnf_interactive or self.disable_most_activities():
+            logger.warning("未启用领取DNF互动站功能，将跳过")
+            return
+
+        self.check_dnf_interactive()
+
+        if now_after("2000-06-15 20:00:00"):
+            self.dnf_interactive_op("TVC（988529）", "859942")
+            self.dnf_interactive_op("生日会（988566）", "859976")
+            self.dnf_interactive_op("希曼畅玩（988567）", "859977")
+            self.dnf_interactive_op("社区（988570）", "859980")
+            self.dnf_interactive_op("DNF_IP（988571）", "859982")
+
+        self.dnf_interactive_op("周年庆大礼包（988169）", "859603")
+
+        async_message_box("DNF互动站分享奖励请自行领取，可领一个装备提升礼盒-。-", "22.6互动站-分享", open_url=get_act_url("DNF互动站"), show_once=True)
+
+    def check_dnf_interactive(self):
+        self.check_bind_account(
+            "DNF互动站",
+            get_act_url("DNF互动站"),
+            activity_op_func=self.dnf_interactive_op,
+            query_bind_flowid="858981",
+            commit_bind_flowid="858980",
+        )
+
+    def dnf_interactive_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_dnf_interactive
+        return self.amesvr_request(
+            ctx,
+            "x6m5.ams.game.qq.com",
+            "group_3",
+            "dnf",
+            iActivityId,
+            iFlowId,
+            print_res,
+            get_act_url("DNF互动站"),
+            **extra_params,
+        )
+
+    # --------------------------------------------翻牌活动--------------------------------------------
+    @try_except()
+    def dnf_card_flip(self):
+        show_head_line("翻牌活动")
+        self.show_amesvr_act_info(self.dnf_card_flip_op)
+
+        if not self.cfg.function_switches.get_dnf_card_flip or self.disable_most_activities():
+            logger.warning("未启用领取翻牌活动功能，将跳过")
+            return
+
+        self.check_dnf_card_flip()
+
+        def query_info() -> tuple[int, int, int, int]:
+            res = self.dnf_card_flip_op("查询信息", "849400", print_res=False)
+            raw_info = parse_amesvr_common_info(res)
+
+            integral = int(raw_info.sOutValue1)
+            times = int(raw_info.sOutValue2)
+            sign = int(raw_info.sOutValue3)
+
+            invited_points = int(raw_info.sOutValue5)
+
+            return integral, times, sign, invited_points
+
+        def query_integral() -> int:
+            return query_info()[0]
+
+        def query_times() -> int:
+            return query_info()[1]
+
+        def query_signin_days() -> int:
+            return query_info()[2]
+
+        def query_card_status() -> list[int]:
+            res = self.dnf_card_flip_op("卡片翻转状态", "849048", print_res=False)
+            raw_res = parse_amesvr_common_info(res)
+
+            status_list = [int(status) for status in raw_res.sOutValue1.split(",")]
+
+            return status_list
+
+        self.dnf_card_flip_op("每日登录游戏", "849439")
+        self.dnf_card_flip_op("每日分享", "849443")
+
+        logger.warning("邀请好友相关内容请自行完成")
+        # self.dnf_card_flip_op("允许授权", "849495")
+        # self.dnf_card_flip_op("取消授权", "849500")
+        # self.dnf_card_flip_op("获取好友列表数据", "849501")
+        # self.dnf_card_flip_op("发送好友消息", "849524")
+        # self.dnf_card_flip_op("获取邀请积分", "849543")
+
+        integral = query_integral()
+        can_change_times = integral // 2
+        logger.info(f"当前拥有积分 {integral}， 可兑换翻牌次数 {can_change_times}")
+        for idx in range_from_one(can_change_times):
+            self.dnf_card_flip_op(f"{idx}/{can_change_times} 积分兑换次数", "849407")
+
+        status_list = query_card_status()
+        times = query_times()
+        logger.info(f"当前翻牌次数为 {times}")
+        if times > 0:
+            for idx, status in enumerate(status_list):
+                if status == 1:
+                    continue
+
+                self.dnf_card_flip_op(f"翻牌 - 第 {idx+1} 张牌", "848911", iNum=idx + 1)
+
+                times -= 1
+                if times <= 0:
+                    break
+
+        status_list = query_card_status()
+        logger.info(f"最新翻牌状况为 {status_list}")
+
+        self.dnf_card_flip_op("第1行奖励", "849071")
+        self.dnf_card_flip_op("第2行奖励", "849170")
+        self.dnf_card_flip_op("第3行奖励", "849251")
+        self.dnf_card_flip_op("第4行奖励", "849270")
+        self.dnf_card_flip_op("第一列奖励", "849284")
+        self.dnf_card_flip_op("第二列奖励", "849285")
+        self.dnf_card_flip_op("第三列奖励", "849288")
+        self.dnf_card_flip_op("第四列奖励", "849289")
+        self.dnf_card_flip_op("终极大奖", "849301")
+
+        self.dnf_card_flip_op("每日签到", "849353")
+        logger.info(color("fg_bold_cyan") + f"当前已累积签到 {query_signin_days()} 天")
+        self.dnf_card_flip_op("累计签到3天", "849381")
+        self.dnf_card_flip_op("累计签到7天", "849384")
+        self.dnf_card_flip_op("累计签到10天", "849385")
+        self.dnf_card_flip_op("累计签到15天", "849386")
+
+    def check_dnf_card_flip(self):
+        self.check_bind_account(
+            "qq视频-翻牌活动",
+            get_act_url("翻牌活动"),
+            activity_op_func=self.dnf_card_flip_op,
+            query_bind_flowid="848910",
+            commit_bind_flowid="848909",
+        )
+
+    def dnf_card_flip_op(self, ctx, iFlowId, print_res=True, **extra_params):
+        iActivityId = self.urls.iActivityId_dnf_card_flip
+        return self.amesvr_request(
+            ctx,
+            "x6m5.ams.game.qq.com",
+            "group_3",
+            "dnf",
+            iActivityId,
+            iFlowId,
+            print_res,
+            get_act_url("翻牌活动"),
+            **extra_params,
+        )
+
     # --------------------------------------------辅助函数--------------------------------------------
     def get(
         self,
@@ -9345,7 +9875,7 @@ class DjcHelper:
         is_normal_jsonp=False,
         need_unquote=True,
         extra_cookies="",
-        check_fn: Callable[[requests.Response], Exception | None] = None,
+        check_fn: Callable[[requests.Response], Exception | None] | None = None,
         extra_headers: dict[str, str] | None = None,
         **params,
     ) -> dict:
@@ -9374,7 +9904,7 @@ class DjcHelper:
         is_normal_jsonp=False,
         need_unquote=True,
         extra_cookies="",
-        check_fn: Callable[[requests.Response], Exception | None] = None,
+        check_fn: Callable[[requests.Response], Exception | None] | None = None,
         extra_headers: dict[str, str] | None = None,
         disable_retry=False,
         **params,
@@ -9563,6 +10093,20 @@ class DjcHelper:
                 "dhnums",
                 "sUin",
                 "pointID",
+                "startPos",
+                "workId",
+                "isSort",
+                "jobName",
+                "title",
+                "toUin",
+                "actSign",
+                "prefer",
+                "card",
+                "answer1",
+                "answer2",
+                "answer3",
+                "countsInfo",
+                "power",
             ]
         }
 
@@ -9607,6 +10151,7 @@ class DjcHelper:
         extra_cookies="",
         show_info_only=False,
         get_act_info_only=False,
+        append_raw_data="",
         **data_extra_params,
     ):
         if show_info_only:
@@ -9626,6 +10171,9 @@ class DjcHelper:
             iFlowId=iFlowId,
             **data_extra_params,
         )
+
+        if append_raw_data != "":
+            data = f"{data}&{append_raw_data}"
 
         def _check(response: requests.Response) -> Exception | None:
             if response.status_code == 401 and "您的速度过快或参数非法，请重试哦" in response.text:
@@ -9702,6 +10250,27 @@ class DjcHelper:
             **data_extra_params,
         )
 
+        def _check(response: requests.Response) -> Exception | None:
+            if response.status_code == 401 and "您的速度过快或参数非法，请重试哦" in response.text:
+                # res.status=401, Unauthorized <Response [401]>
+                #
+                # <html>
+                # <head><title>Tencent Game 401</title></head>
+                # <meta charset="utf-8" />
+                # <body bgcolor="white">
+                # <center><h1>Welcome Tencent Game 401</h1></center>
+                # <center><h1>您的速度过快或参数非法，请重试哦</h1></center>
+                # <hr><center>Welcome Tencent Game</center>
+                # </body>
+                # </html>
+                #
+                wait_seconds = 0.1 + random.random()
+                logger.warning(get_meaningful_call_point_for_log() + f"请求过快，等待{wait_seconds:.2f}秒后重试")
+                time.sleep(wait_seconds)
+                return Exception("请求过快")
+
+            return None
+
         return self.post(
             ctx,
             self.urls.ide,
@@ -9709,6 +10278,7 @@ class DjcHelper:
             ide_host=ide_host,
             print_res=print_res,
             extra_cookies=extra_cookies,
+            check_fn=_check,
         )
 
     def preprocess_eas_url(self, eas_url: str) -> str:
@@ -9747,7 +10317,7 @@ class DjcHelper:
         change_bind_role_infos: list[TemporaryChangeBindRoleInfo],
         check_func: Callable,
         callback_func: Callable[[RoleInfo], bool],
-        need_try_func: Callable[[RoleInfo], bool] = None,
+        need_try_func: Callable[[RoleInfo], bool] | None = None,
     ):
         """
         callback_func: 传入参数为 将要领奖的角色信息，返回参数为 是否继续尝试下一个
@@ -9800,7 +10370,7 @@ class DjcHelper:
         query_bind_flowid,
         commit_bind_flowid,
         try_auto_bind=True,
-        roleinfo: RoleInfo = None,
+        roleinfo: RoleInfo | None = None,
         roleinfo_source="道聚城所绑定的角色",
     ):
         while True:
@@ -9852,7 +10422,7 @@ class DjcHelper:
         commit_bind_flowid="",
         try_auto_bind=False,
         bind_reason="未绑定角色",
-        roleinfo: RoleInfo = None,
+        roleinfo: RoleInfo | None = None,
         roleinfo_source="道聚城所绑定的角色",
     ):
         if (
@@ -9910,15 +10480,94 @@ class DjcHelper:
                 "若无需该功能，可关闭工具，然后前往配置文件自行关闭该功能\n"
                 "若默认浏览器打不开该页面，请自行在手机或其他浏览器打开下面的页面\n"
                 f"{activity_url}\n"
+                "\n"
+                "如果该账号没有DNF角色，无法完成绑定，请打开当前账号的【活动开关/各功能开关/禁用绝大部分活动】，避免每次都弹出需要绑定的窗口\n"
             )
             message_box(msg, "需绑定账号", open_url=activity_url)
             logger.info(color("bold_yellow") + "请在完成绑定后按任意键继续")
             pause()
 
-    def disable_most_activities(self):
-        return self.cfg.function_switches.disable_most_activities
+    def ide_check_bind_account(
+        self,
+        activity_name: str,
+        activity_url: str,
+        activity_op_func: Callable,
+        sAuthInfo: str,
+        sActivityInfo: str,
+        roleinfo: RoleInfo | None = None,
+        roleinfo_source="道聚城所绑定的角色",
+    ):
+        if sAuthInfo != "" and sActivityInfo != "":
+            self.dnf_social_relation_permission_op(
+                "更新创建用户授权信息", "108939", sAuthInfo=sAuthInfo, sActivityInfo=sActivityInfo, print_res=False
+            )
 
-    def get_dnf_roleinfo(self, roleinfo: RoleInfo = None):
+        bind_config = activity_op_func(f"查询活动信息 - {activity_name}", "", get_act_info_only=True).get_bind_config()
+
+        query_bind_res = activity_op_func("查询绑定", bind_config.query_map_id, print_res=False)
+
+        need_bind = False
+        bind_reason = ""
+
+        if query_bind_res["jData"]["bindarea"] is None:
+            # 未绑定角色
+            need_bind = True
+            bind_reason = "未绑定角色"
+        elif self.common_cfg.force_sync_bind_with_djc:
+            if roleinfo is None:
+                # 若未从外部传入roleinfo，则使用道聚城绑定的信息
+                roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
+            bindinfo = AmesvrUserBindInfo().auto_update_config(query_bind_res["jData"]["bindarea"])
+
+            if roleinfo.serviceID != bindinfo.Farea or roleinfo.roleCode != bindinfo.FroleId:
+                current_account = (
+                    f"{unquote_plus(bindinfo.FareaName)}-{unquote_plus(bindinfo.FroleName)}-{bindinfo.FroleId}"
+                )
+                djc_account = f"{roleinfo.serviceName}-{roleinfo.roleName}-{roleinfo.roleCode}"
+
+                need_bind = True
+                bind_reason = f"当前绑定账号({current_account})与{roleinfo_source}({djc_account})不一致"
+
+        if not need_bind:
+            # 不需要绑定
+            return
+
+        if not self.common_cfg.try_auto_bind_new_activity:
+            # 未开启自动绑定
+            return
+
+        if "dnf" not in self.bizcode_2_bind_role_map:
+            # 道聚城未绑定DNF角色
+            return
+
+        # 若道聚城已绑定dnf角色，则尝试绑定这个角色
+        if roleinfo is None:
+            # 若未从外部传入roleinfo，则使用道聚城绑定的信息
+            roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
+        checkInfo = self.get_dnf_roleinfo(roleinfo)
+        role_extra_info = self.query_dnf_role_info_by_serverid_and_roleid(roleinfo.serviceID, roleinfo.roleCode)
+
+        logger.warning(
+            color("bold_yellow")
+            + f"活动【{activity_name}】{bind_reason}，当前配置为自动绑定模式，将尝试绑定为{roleinfo_source}({roleinfo.serviceName}-{roleinfo.roleName})"
+        )
+
+        activity_op_func(
+            "提交绑定",
+            bind_config.bind_map_id,
+            sRoleId=roleinfo.roleCode,
+            sRoleName=triple_quote(roleinfo.roleName),
+            sArea=roleinfo.serviceID,
+            sMd5str=checkInfo.md5str,
+            sCheckparam=quote_plus(checkInfo.checkparam),
+            roleJob=role_extra_info.forceid,
+            sAreaName=triple_quote(roleinfo.serviceName),
+        )
+
+    def disable_most_activities(self):
+        return self.cfg.function_switches.disable_most_activities_v2
+
+    def get_dnf_roleinfo(self, roleinfo: RoleInfo | None = None):
         if roleinfo is None:
             roleinfo = self.bizcode_2_bind_role_map["dnf"].sRoleInfo
 
@@ -9937,6 +10586,10 @@ class DjcHelper:
         return AmesvrQueryRole().auto_update_config(res)
 
     def fetch_share_p_skey(self, ctx: str, cache_max_seconds: int = 0) -> str:
+        if self.cfg.function_switches.disable_login_mode_normal:
+            logger.warning(f"禁用了普通登录模式，将不会尝试获取分享用的p_skey: {ctx}")
+            return ""
+
         return self.fetch_login_result(ctx, QQLogin.login_mode_normal, cache_max_seconds=cache_max_seconds).apps_p_skey
 
     def fetch_club_vip_p_skey(self, ctx: str, cache_max_seconds: int = 0) -> LoginResult:
@@ -9967,16 +10620,18 @@ class DjcHelper:
         ql = QQLogin(self.common_cfg)
         if self.cfg.login_mode == "qr_login":
             # 扫码登录
-            lr = ql.qr_login(login_mode=login_mode, name=self.cfg.name)
+            lr = ql.qr_login(login_mode, name=self.cfg.name, account=self.cfg.account_info.account)
         else:
             # 自动登录
-            lr = ql.login(
-                self.cfg.account_info.account, self.cfg.account_info.password, login_mode=login_mode, name=self.cfg.name
-            )
+            lr = ql.login(self.cfg.account_info.account, self.cfg.account_info.password, login_mode, name=self.cfg.name)
 
         return lr
 
     def fetch_xinyue_login_info(self, ctx) -> LoginResult:
+        if self.cfg.function_switches.disable_login_mode_xinyue:
+            logger.warning(f"禁用了心悦登录模式，将不会尝试更新心悦登录信息: {ctx}")
+            return LoginResult()
+
         return self.fetch_login_result(
             ctx, QQLogin.login_mode_xinyue, cache_max_seconds=-1, cache_validate_func=self.is_xinyue_login_info_valid
         )
@@ -9985,6 +10640,10 @@ class DjcHelper:
         return self._is_openid_login_info_valid("101478665", lr.openid, lr.xinyue_access_token)
 
     def fetch_iwan_login_info(self, ctx) -> LoginResult:
+        if self.cfg.function_switches.disable_login_mode_iwan:
+            logger.warning(f"禁用了爱玩登录模式，将不会尝试更新爱玩 p_skey: {ctx}")
+            return LoginResult()
+
         return self.fetch_login_result(
             ctx, QQLogin.login_mode_iwan, cache_max_seconds=-1, cache_validate_func=self.is_iwan_login_info_valid
         )
@@ -10119,7 +10778,15 @@ def get_prize_names() -> list[str]:
 
 def fake_djc_helper() -> DjcHelper:
     cfg = config(force_reload_when_no_accounts=True, print_res=False)
-    return DjcHelper(cfg.account_configs[0], cfg.common)
+
+    account_config: AccountConfig
+    if len(cfg.account_configs) != 0:
+        account_config = cfg.account_configs[0]
+    else:
+        account_config = AccountConfig()
+        account_config.on_config_update({})
+
+    return DjcHelper(account_config, cfg.common)
 
 
 def watch_live():
@@ -10140,7 +10807,7 @@ def watch_live():
         logger.info(color("bold_yellow") + f"开始执行第{t + 1}分钟的流程")
         for idx in indexes:  # 从1开始，第i个
             account_config = cfg.account_configs[idx - 1]
-            if not account_config.is_enabled() or account_config.cannot_bind_dnf:
+            if not account_config.is_enabled() or account_config.cannot_bind_dnf_v2:
                 logger.warning("账号被禁用或无法绑定DNF，将跳过")
                 continue
 
@@ -10167,10 +10834,18 @@ if __name__ == "__main__":
 
     RunAll = False
     indexes = [1]
+    # ps: 小号一号是 4 + 1
+    # indexes = [
+    #     4 + 1,
+    #     *[4 + idx for idx in range(1, 7 + 1)],
+    # ]
     if RunAll:
         indexes = [i + 1 for i in range(len(cfg.account_configs))]
 
     qq_to_djcHelper: dict[str, DjcHelper] = {}
+
+    # 测试时仍然启用被标记为安全模式的账号，方便测试
+    cfg.common.enable_in_safe_mode_accounts = True
 
     for idx in indexes:  # 从1开始，第i个
         account_config = cfg.account_configs[idx - 1]
@@ -10207,4 +10882,4 @@ if __name__ == "__main__":
         djcHelper.get_bind_role_list()
 
         # djcHelper.dnf_kol()
-        djcHelper.dnf_welfare()
+        djcHelper.qq_video_iwan()

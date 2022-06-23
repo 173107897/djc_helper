@@ -17,6 +17,7 @@ import psutil
 import ga
 from check_first_run import check_first_run_async
 from config import config, load_config
+from db_def import try_migrate_db
 from first_run import is_weekly_first_run
 from log import color, log_directory, logger
 from main_def import (
@@ -44,7 +45,9 @@ from main_def import (
     try_take_xinyue_team_award,
 )
 from pool import close_pool, init_pool
+from qq_login import QQLogin
 from show_usage import show_usage
+from update import notify_manual_check_update_on_release_too_long
 from usage_count import increase_counter
 from util import (
     MiB,
@@ -58,6 +61,7 @@ from util import (
     is_run_in_github_action,
     kill_other_instance_on_start,
     pause,
+    remove_old_version_portable_chrome_files,
     show_head_line,
     show_unexpected_exception_message,
 )
@@ -107,6 +111,8 @@ def prepare_env():
 
 
 def main():
+    try_migrate_db()
+
     increase_counter(name="run/begin", ga_type=ga.GA_REPORT_TYPE_PAGE_VIEW)
 
     prepare_env()
@@ -127,6 +133,8 @@ def main():
 
     if len(cfg.account_configs) == 0:
         raise Exception("未找到有效的账号配置，请检查是否正确配置。ps：多账号版本配置与旧版本不匹配，请重新配置")
+
+    notify_manual_check_update_on_release_too_long(cfg.common)
 
     check_proxy(cfg)
 
@@ -160,7 +168,14 @@ def main():
     clean_dir_to_size(log_directory, cfg.common.max_logs_size * MiB, cfg.common.keep_logs_size * MiB)
     clean_dir_to_size(f"utils/{log_directory}", cfg.common.max_logs_size * MiB, cfg.common.keep_logs_size * MiB)
 
+    current_chrome_version = QQLogin(cfg.common).get_chrome_major_version()
+    remove_old_version_portable_chrome_files(current_chrome_version)
+
     show_ask_message_box(cfg)
+
+    # 检查是否有更新，用于提示未购买自动更新的朋友去手动更新~
+    if cfg.common.check_update_on_start:
+        check_update(cfg)
 
     check_all_skey_and_pskey(cfg)
 
@@ -171,10 +186,6 @@ def main():
 
     # 挪到所有账号都登陆后再尝试自动更新，从而能够判定是否已购买DLC
     try_auto_update(cfg)
-
-    # 检查是否有更新，用于提示未购买自动更新的朋友去手动更新~
-    if cfg.common.check_update_on_start:
-        check_update(cfg)
 
     # 查询付费信息供后面使用
     show_head_line("查询付费信息")

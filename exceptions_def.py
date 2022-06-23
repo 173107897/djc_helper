@@ -22,3 +22,17 @@ class DnfHelperChronicleTokenExpiredOrWrongException(Exception):
     """
 
     pass
+
+
+class ArkLotteryTargetQQSendByRequestReachMaxCount(Exception):
+    """
+    集卡目标QQ本日索取赠送次数已达到上限
+    """
+
+    pass
+
+
+class RequireVerifyMessageButInHeadlessMode(Exception):
+    """需要验证短信，由于当前配置为不显示浏览器界面，因此强制结束第一轮慢速重试阶段，确保界面显示出来"""
+
+    pass

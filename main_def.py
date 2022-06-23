@@ -18,6 +18,7 @@ from const import downloads_dir
 from dao import BuyInfo, BuyRecord
 from db import DnfHelperChronicleUserActivityTopInfoDB, UserBuyInfoDB
 from djc_helper import DjcHelper, get_prize_names, is_new_version_ark_lottery, run_act
+from exceptions_def import ArkLotteryTargetQQSendByRequestReachMaxCount, SameAccountTryLoginAtMultipleThreadsException
 from first_run import is_daily_first_run, is_first_run, is_weekly_first_run
 from log import asciiReset, color, logger
 from notice import NoticeManager
@@ -40,6 +41,7 @@ from urls import Urls, get_not_ams_act_desc
 from usage_count import get_count, increase_counter
 from util import (
     MB_ICONINFORMATION,
+    MiB,
     append_if_not_in,
     async_call,
     async_message_box,
@@ -48,6 +50,7 @@ from util import (
     bypass_proxy,
     cache_name_user_buy_info,
     change_title,
+    clean_dir_to_size,
     clear_login_status,
     exists_auto_updater_dlc,
     exists_flag_file,
@@ -78,6 +81,7 @@ from util import (
     uin2qq,
     use_by_myself,
     wait_a_while,
+    wait_for,
     with_cache,
 )
 from version import author, now_version, ver_time
@@ -124,18 +128,19 @@ def check_djc_role_binding():
             logger.warning(color("fg_bold_yellow") + f"------------检查第{idx}个账户({account_config.name}------------")
 
             # 如果配置为无法绑定道聚城，则提示将无法领取任何奖励
-            if account_config.cannot_bind_dnf:
+            if account_config.cannot_bind_dnf_v2:
                 async_message_box(
                     (
                         f"账号 {account_config.name} 目前配置为 【无法在道聚城绑定dnf】，将产生下列后果：\n"
-                        f"1. 将在未绑定道聚城的情况下可以继续使用\n"
-                        f"2. 因未绑定道聚城，将无法获取角色绑定信息，因此将无法领取任何其他奖励\n"
+                        "1. 将跳过检查dnf角色绑定流程，在未绑定道聚城的情况下可以继续使用\n"
+                        "2. 如果真的没用在道聚城中绑定dnf的角色，将导致后续流程中无法获取角色绑定信息，因此将无法完成自动绑定活动角色以及领取奖励\n"
                         "\n"
                         "这个开关主要用于小号，被风控不能注册dnf账号，但是不影响用来当抽卡等活动的工具人\n"
-                        "请确定你打开这个开关的目的是这样，如果仅仅是不想领取道聚城的奖励，其他奖励想正常使用，请勿打开本开关，请单独修改【道聚城兑换】相关的配置"
+                        "请确定你打开这个开关的目的是这样，如果仅仅是不想领取道聚城的奖励，其他奖励想正常使用，请勿打开本开关，请单独修改【道聚城兑换】相关的配置\n"
                     ),
                     f"禁用道聚城绑定后果提示_{account_config.name}",
                     show_once=True,
+                    color_name="yellow",
                 )
 
             djcHelper = DjcHelper(account_config, cfg.common)
@@ -146,31 +151,57 @@ def check_djc_role_binding():
         if all_binded:
             break
         else:
-            _show_head_line("以上是问题描述")
+            _show_head_line("0. 以上是问题描述")
 
-            _show_head_line("解决方案")
+            _show_head_line("1. 解决方案")
             logger.warning(
                 color("bold_cyan")
-                + f"请前往道聚城（未安装的话，手机上应用商城搜索 道聚城 下载安装就行）将上述提示的未绑定dnf或任意手游的账号【{not_binded_accounts}】进行绑定（就是去道聚城对应游戏页面把领奖角色给选好）"
+                + "请前往道聚城（未安装的话，手机上应用商城搜索 道聚城 下载安装就行）将上述提示的未绑定【dnf】或【任意手游】的账号进行绑定（就是去道聚城对应游戏页面把领奖角色给选好）"
             )
 
-            _show_head_line("详细教程")
+            logger.info(color("bold_cyan") + "相关账号如下:")
+            heads = ["序号", "账号名", "QQ"]
+            colSizes = [4, 12, 10]
+            logger.info(color("bold_cyan") + tableify(heads, colSizes))
+            for idx, info in enumerate(not_binded_accounts):
+                name, qq = info
+
+                row = [idx + 1, name, qq]
+                logger.info(color("bold_cyan") + tableify(row, colSizes))
+
+            _show_head_line("2. 详细教程")
             logger.warning(
                 color("bold_cyan")
                 + (
                     "具体操作流程可以参考一下教程信息：\n"
                     "1. 使用教程/使用文档.docx 【设置领奖角色】章节和【设置道聚城手游角色】章节\n"
-                    "2. 使用教程/道聚城自动化助手使用视频教程 中 DNF蚊子腿小助手4.1.1版本简要&完整视频教程 中 3:17 位置 关于绑定的介绍"
+                    "2. 使用教程/道聚城自动化助手使用视频教程 中 DNF蚊子腿小助手4.1.1版本简要&完整视频教程 中 3:17 位置 关于绑定的介绍\n"
                 )
             )
 
-            _show_head_line("跳过方式")
+            _show_head_line("3. 跳过方式")
             logger.warning(
-                color("yellow") + "如果本账号不需要道聚城相关操作，可以打开配置工具，将该账号的【道聚城配置】中的【无法在道聚城绑定dnf】勾选上，并将【完成礼包达人任务的手游名称】设为最上方的【无】"
+                color("bold_yellow")
+                + (
+                    "如果本账号不需要道聚城相关操作，请按下列步骤操作\n"
+                    "1. 可以打开配置工具，点开对应账号的tab\n"
+                    "2. 将该账号的【道聚城配置】中的【无法在道聚城绑定dnf】勾选上\n"
+                    "3. 并将【完成礼包达人任务的手游名称】选择为最上方的【无】\n"
+                    "4. 保存配置\n"
+                    "5. 回到这个页面按任意键继续\n"
+                    "\n"
+                    "PS:\n"
+                    "勾选【无法在道聚城绑定dnf】后将无法领取任何奖励，主要用于小号，被风控不能注册dnf账号，但是不影响用来当抽卡等活动的工具人\n"
+                    "勾选【完成礼包达人任务的手游名称】后道聚城的每日手游活动将不会完成，活跃度会低于领取金宝箱所需\n"
+                    "\n"
+                    "由于现在道聚城没有什么可以兑换的，以前每天兑换的10个调整箱也已经挪到助手app的编年史中了，如果没有玩任何手游的话，可以放心地将手游名称设置为 无\n"
+                )
             )
 
-            _show_head_line("请完成上述操作，然后按任意键再次进行检查")
+            _show_head_line("4. 请完成上述操作，然后按任意键再次进行检查")
             logger.warning(color("bold_red") + "千万不要进群问这个，会被直接踢的。不欢迎不看文档，也不看提示的人。")
+            logger.warning(color("bold_yellow") + "千万不要进群问这个，会被直接踢的。不欢迎不看文档，也不看提示的人。")
+            logger.warning(color("bold_blue") + "千万不要进群问这个，会被直接踢的。不欢迎不看文档，也不看提示的人。")
             logger.info("\n\n")
             pause()
 
@@ -186,7 +217,11 @@ def check_all_skey_and_pskey(cfg: Config, check_skey_only=False):
 
     QQLogin(cfg.common).check_and_download_chrome_ahead()
 
-    if cfg.common.enable_multiprocessing and cfg.is_all_account_auto_login():
+    if (
+        cfg.common.enable_multiprocessing
+        and cfg.common.enable_multiprocessing_login
+        and cfg.is_all_account_auto_login()
+    ):
         # 并行登陆
         logger.info(color("bold_yellow") + f"已开启多进程模式({cfg.get_pool_size()})，并检测到所有账号均使用自动登录模式，将开启并行登录模式")
 
@@ -227,11 +262,22 @@ def check_all_skey_and_pskey(cfg: Config, check_skey_only=False):
 def do_check_all_skey_and_pskey(
     idx: int, window_index: int, account_config: AccountConfig, common_config: CommonConfig, check_skey_only: bool
 ) -> Optional[DjcHelper]:
-    wait_a_while(idx)
+    while True:
+        try:
+            wait_a_while(idx)
 
-    logger.warning(color("fg_bold_yellow") + f"------------检查第{idx}个账户({account_config.name})------------")
+            logger.warning(color("fg_bold_yellow") + f"------------检查第{idx}个账户({account_config.name})------------")
 
-    return _do_check_all_skey_and_pskey(window_index, account_config, common_config, check_skey_only)
+            return _do_check_all_skey_and_pskey(window_index, account_config, common_config, check_skey_only)
+        except SameAccountTryLoginAtMultipleThreadsException:
+            wait_for(
+                color("bold_yellow")
+                + (
+                    f"[{account_config.name}] 似乎因为skey中途过期，而导致多个进程同时尝试重新登录当前账号，当前进程较迟尝试，因此先等待一段时间，等第一个进程登录完成后再重试。"
+                    f"如果一直重复，请关闭当前窗口，然后在配置工具中点击【清除登录状态】按钮后再次运行~"
+                ),
+                20,
+            )
 
 
 def check_all_skey_and_pskey_silently_sync(cfg: Config):
@@ -323,14 +369,17 @@ def auto_send_cards(cfg: Config):
                 + f"第{idx + 1}/{len(target_qqs)}个赠送目标账号 {name}({target_qq}) 今日仍可被赠送 {left_times} 次卡片{extra_message}"
             )
             # 最多赠送目标账号今日仍可接收的卡片数
-            for send_idx in range_from_one(left_times):
-                logger.info(color("bold_yellow") + f"尝试第 [{send_idx}/{left_times}] 次赠送卡片给 {name}({target_qq})")
-                other_account_has_card = send_card(
-                    target_qq, qq_to_card_name_to_counts, qq_to_prize_counts, qq_to_djcHelper, target_qqs
-                )
-                if not other_account_has_card:
-                    logger.warning(f"第 {send_idx} 次赠送时其他账号已经没有任何卡片，跳过后续尝试")
-                    break
+            try:
+                for send_idx in range_from_one(left_times):
+                    logger.info(color("bold_yellow") + f"尝试第 [{send_idx}/{left_times}] 次赠送卡片给 {name}({target_qq})")
+                    other_account_has_card = send_card(
+                        target_qq, qq_to_card_name_to_counts, qq_to_prize_counts, qq_to_djcHelper, target_qqs
+                    )
+                    if not other_account_has_card:
+                        logger.warning(f"第 {send_idx} 次赠送时其他账号已经没有任何卡片，跳过后续尝试")
+                        break
+            except ArkLotteryTargetQQSendByRequestReachMaxCount as e:
+                logger.warning(color("bold_yellow") + f"{name}({target_qq}) 今日被赠送和通过索取来赠送均已达上限，将跳过尝试后续赠送尝试。具体结果为：{e}")
 
             # 赠送卡片完毕后尝试领取奖励和抽奖
             djcHelper = qq_to_djcHelper[target_qq]
@@ -829,7 +878,8 @@ def sas(cfg: Config, ctx: str, user_buy_info: BuyInfo):
         "上月",
         "自动匹配",
         "论坛代币券",
-        # "闪光杯爆装",
+        "心悦集卡",
+        "小屋",
     ]
     colSizes = [
         4,
@@ -849,7 +899,8 @@ def sas(cfg: Config, ctx: str, user_buy_info: BuyInfo):
         4,
         8,
         10,
-        # 10,
+        15,
+        4,
     ]
 
     logger.info(tableify(heads, colSizes))
@@ -916,7 +967,13 @@ def get_account_status(idx: int, account_config: AccountConfig, common_config: C
 
     dbq = djcHelper.query_dnf_bbs_dbq()
 
-    # shanguang_equip_count = djcHelper.query_dnf_shanguang_equip_count(print_warning=False)
+    card_counts = djcHelper.query_xinyue_card_counts()
+    if card_counts != [0] * len(card_counts):
+        card_count_info = " ".join(f"{count}" for count in card_counts)
+    else:
+        card_count_info = ""
+
+    my_home_points = djcHelper.my_home_query_integral()
 
     return [
         idx,
@@ -937,7 +994,8 @@ def get_account_status(idx: int, account_config: AccountConfig, common_config: C
         can_auto_match_dnf_helper_chronicle,
         # majieluo_stone, majieluo_invite_count,
         dbq,
-        # shanguang_equip_count,
+        card_count_info,
+        my_home_points,
     ]
 
 
@@ -1051,7 +1109,7 @@ def try_report_usage_info(cfg: Config):
 
     # 上报网盘地址，用于区分分发渠道
     if not run_from_src():
-        increase_counter(ga_category="netdisk_link", name=cfg.common.netdisk_link)
+        increase_counter(ga_category="netdisk_link", name=cfg.common.netdisk_link_for_report)
 
 
 @try_except(show_exception_info=False)
@@ -1153,7 +1211,7 @@ def try_xinyue_sailiyam_start_work(cfg):
         djcHelper.get_bind_role_list()
         if (
             account_config.function_switches.get_xinyue_sailiyam
-            or account_config.function_switches.disable_most_activities
+            and not account_config.function_switches.disable_most_activities_v2
         ):
             # 先尝试领工资
             djcHelper.show_xinyue_sailiyam_work_log()
@@ -1209,7 +1267,7 @@ def show_buy_info(user_buy_info: BuyInfo, cfg: Config, need_show_message_box=Tru
                 has_use_card_secret = True
                 break
 
-        if is_first_run("卡密付费方案提示v2") or (
+        if (
             not use_by_myself()
             and user_buy_info.total_buy_month > 0
             and not has_use_card_secret
@@ -1258,8 +1316,7 @@ def check_update(cfg):
         logger.info("当前在github action环境下运行，无需检查更新")
         return
 
-    auto_updater_path = os.path.realpath("utils/auto_updater.exe")
-    if os.path.exists(auto_updater_path):
+    if exists_auto_updater_dlc():
         # 如果存在自动更新DLC，则走自动更新的流程，不再手动检查是否有更新内容
         return
 
@@ -1304,14 +1361,9 @@ def print_update_message_on_first_run_new_version():
     if is_first_run(f"print_update_message_v{now_version}"):
         try:
             ui = get_update_info(cfg.common)
-            message = (
-                f"新版本v{ui.latest_version}已更新完毕，具体更新内容展示如下，以供参考：\n"
-                f"{ui.update_message}"
-                "\n"
-                "若未购买自动更新dlc，可无视下一句\n"
-                "PS：自动更新会更新示例配置config.example.toml，但不会更新config.toml。不过由于基本所有活动的默认配置都是开启的，所以除非你想要关闭特定活动，或者调整活动配置，其实没必要修改config.toml\n"
-            )
-            logger.warning(color("bold_yellow") + message)
+            message = f"新版本v{ui.latest_version}已更新完毕，具体更新内容展示如下，以供参考：\n" f"{ui.update_message}"
+
+            async_message_box(message, "新版本更新内容")
         except Exception as e:
             logger.warning("新版本首次运行获取更新内容失败，请自行查看CHANGELOG.MD", exc_info=e)
 
@@ -1354,60 +1406,47 @@ def show_tips(cfg: Config):
     _show_head_line("一些小提示")
 
     tips = {
-        "工具下载": ("如需下载chrome、autojs、HttpCanary、vscode、bandizip等小工具，可前往网盘自助下载：https://fzls.lanzouo.com/s/djc-tools"),
-        "视频教程": ("部分活动的配置可能比较麻烦，因此新录制了几个视频教程，有兴趣的朋友可以自行观看：https://www.bilibili.com/video/BV1LQ4y1y7QJ?p=1"),
+        "工具下载": (
+            "如需下载chrome、autojs、HttpCanary、vscode、bandizip等小工具，可前往网盘自助下载：\n" "https://fzls.lanzouo.com/s/djc-tools\n"
+        ),
+        "视频教程": ("部分活动的配置可能比较麻烦，因此新录制了几个视频教程，有兴趣的朋友可以自行观看：\n" "https://www.bilibili.com/video/BV1LQ4y1y7QJ?p=1\n"),
         "助手编年史": (
             "dnf助手签到任务和浏览咨询详情页请使用auto.js等自动化工具来模拟打开助手去执行对应操作，当然也可以每天手动打开助手点一点-。-\n"
             "也就是说，小助手不会帮你*完成*上述任务的条件，只会在你完成条件的前提下，替你去领取任务奖励\n"
             "此外，如果想要自动领取等级奖励，请把配置工具中助手相关的所有配置项都填上\n"
         ),
-        "22春节微信签到活动": (
-            "官方微信公众号【地下城与勇士】的签到活动请自行完成，或者借助于autojs等工具来自动完成，具体思路可以参考我之前写的autojs盖楼活动的流程，自行修改。\n"
-            "手动参与流程：1. 打开公众号 2. 输入【虎年签到】，点进活动页面签到即可\n"
-            "连续签到30天可以领取一个+12强化券。活动目前显示调试中，不知何时会上线\n"
+        "绑定手机领666代币券": (
+            "之前春节短暂上线又鸽掉的绑手机领666欢乐代币券活动又回来了，大家可以去点一点: \n" "https://dnf.qq.com/cp/a20211230info/index.html\n"
         ),
-        "22春节手动参与的活动": (
-            "以下活动请手动参与:\n"
-            "1. 心悦充值点花灯 https://xinyue.qq.com/act/a20211209xinchun/share.html\n"
-            "2. 预购活动 https://pay.qq.com/h5/activity/vision_new_creator.php?key=dnf_xctdqygz_lottery&pf=__mds_dnf_share&_wv=1\n"
-            "3. 年套补给站 https://pay.qq.com/h5/activity/vision_new_creator.php?key=dnf_xcjqdhz_lottery&pf=__mds_dnf_dy_xzs\n"
-            "4. 拼团活动 https://club.vip.qq.com/qqvip/acts2022/dnfGroup?_wv=16777216"
+        "22.6 Hello语音": ("Hello语音app活动请自行完成，可领取宠物和光环等（似乎是限量发放的-。-）\n https://dnf.qq.com/cp/a20220615hello/"),
+        "22.6 公众号签到": (
+            "DNF公众号【地下城与勇士】有个新的签到活动，需要自行完成，步骤如下:\n" "关注公众号，每天在公众号发送【签到】，点击回复的活动链接，进去签到即可\n" "累计20天可得增幅书，30天一个灿烂自选-。-"
         ),
-        "22春节联动会员活动": (
-            "以下活动是各种会员联动，购买对应会员后可以领取特定奖励，以及兑换部分奖励\n"
-            "1. QQ视频 https://magic.iwan.qq.com/magic-act/iuc6hayzjxw2it907a4q7yerkg/index_page1.html\n"
-            "2. 超级会员 https://act.qzone.qq.com/v2/vip/tx/p/20687_41fbdb6b\n"
-            "3. 黄钻 https://act.qzone.qq.com/v2/vip/tx/p/20683_605cb50c\n"
+        "22.6 虎牙斗鱼": (
+            "虎牙斗鱼的活动依旧请自行完成，链接如下：\n"
+            "虎牙：https://www.huya.com/g/2#cate-1-5483\n"
+            "斗鱼：https://www.douyu.com/topic/DNFSRH?rid=5324055\n"
         ),
-        "22魔界人跳一跳": (
-            "一个类似微信跳一跳的小游戏，每天最多尝试6次，全部通过可以获得一年的黑钻，需要手动完成\n" "https://dnf.qq.com/mingame/jump/index.html?pt=1\n"
+        "22.6 colg模拟器活动": (
+            "colg的模拟器活动请自行参加，15天可领取随机灿烂，流程如下："
+            "1. 每天打开模拟器页面，选择装备并保存搭配：https://bbs.colg.cn/colg_activity_new-simulator.html?from_collect\n"
+            "2. 保存后在活动页面点击签到领取奖励：https://bbs.colg.cn/colg_activity_new-time.html/simulator\n"
         ),
-        "22直播活动": (
-            "斗鱼虎牙的活动请自行完成\n"
-            "斗鱼：https://www.douyu.com/topic/DNFXCFL?rid=5324055\n"
-            "虎牙：https://www.huya.com/g/2#cate-1-5027\n"
+        "22.6 肥腙与井盖小游戏": (
+            "周年庆多了个肥腙小游戏，与之前的井盖小游戏一样，请自行完成~\n"
+            "其实就是选择关卡后不停循环点四个技能按钮，所以可以用按键精灵、autojs等工具做一个简单的脚本，循环点这四个位置就好了- -有兴趣可以自行折腾~\n"
+            "可以参考我的autojs仓库中的 fat_zong.js ，将x，y坐标改成你手机上的实际位置就好了~\n"
+            "肥腙小游戏（横版RPG）：https://dnf.qq.com/mingame/adventure/index.html\n"
+            "井盖小游戏（跳一跳）：https://dnf.qq.com/mingame/jump/index.html\n"
         ),
-    }
-
-    wx_act_flag_file = ".disable_wx_sign_tip"
-    if not exists_flag_file(wx_act_flag_file) and is_daily_first_run("22春节微信签到活动"):
-        async_message_box(
-            (
-                "请打开微信，在【地下城与勇士】公众号 输入【虎年签到】，参与签到活动。累计30天可以领取+12强化券。\n"
-                "\n"
-                f"如果不想要每天弹出本提示，请在小助手目录创建名为 {wx_act_flag_file} 的文件或者目录来关闭本提示\n"
-            ),
-            "微信签到每日提示",
+        "22.6 b站联合活动": (
+            "b站出了个DNF周年庆活动，有兴趣的朋友请自行参与：https://www.bilibili.com/blackboard/activity-W9sZ1qMkS9.html#M6SZxUxF66L\n"
+        ),
+        "22.6 快手活动": (
+            "新出了个快手活动，请自行完成~\n"
+            "https://ppg.viviv.com/doodle/YWVPrRSG.html"
         )
-
-    # if now_after("2022-01-20 06:00:00"):
-    #     tips = {
-    #         **tips,
-    #
-    #         "22手机绑定活动": (
-    #             "手机绑定可领取666欢乐代币券，请自行绑定领取：https://dnf.qq.com/cp/a20211230info/index.html"
-    #         ),
-    #     }
+    }
 
     logger.info(color("bold_green") + "如果看上去卡在这了，请看看任务是否有弹窗的图标，把他们一个个按掉就能继续了（活动此时已经运行完毕）")
 
@@ -1417,8 +1456,8 @@ def show_tips(cfg: Config):
         if tip.endswith("\n"):
             tip = tip[:-1]
 
-        msg = f"{title}: {tip}\n "
-        async_message_box(msg, f"一些小提示_{title}", show_once=True, follow_flag_file=False)
+        msg = tip.replace("\n", "\n\n") + "\n"
+        message_box(msg, f"一些小提示_{title}", show_once=True, follow_flag_file=False, use_qt_messagebox=True)
 
     # 尝试给自己展示一些提示
     show_tips_for_myself()
@@ -1432,7 +1471,14 @@ def show_tips_for_myself():
         return
 
     # if is_weekly_first_run("微信支付维护提示"):
-    #     async_message_box("看看微信支付的渠道维护结束了没。如果结束了，就把配置工具中微信支付按钮的点击特殊处理干掉", "支付维护")
+    #     show_tip_for_myself("看看微信支付的渠道维护结束了没。如果结束了，就把配置工具中微信支付按钮的点击特殊处理干掉", "支付维护")
+
+    # if is_weekly_first_run("交易乐维护提示"):
+    #     show_tip_for_myself("看看交易乐是否已经修复，如果已经正常运行，则将配置工具中默认启用卡密的处理移除（搜：默认启用卡密）", "交易乐维护提示")
+
+
+def show_tip_for_myself(msg: str, title: str):
+    message_box(msg, f"给自己看的提示 - {title}")
 
 
 def try_auto_update(cfg):
@@ -1619,7 +1665,7 @@ def has_buy_auto_updater_dlc_and_query_ok(
                     continue
 
                 buy_users = []
-                with open(user_list_filepath, encoding="utf-8") as data_file:
+                with open(str(user_list_filepath), encoding="utf-8") as data_file:
                     buy_users = json.load(data_file)
 
                 if len(buy_users) != 0:
@@ -1744,7 +1790,7 @@ def get_user_buy_info_from_netdisk(
                         if time_less(old_info.expire_at, info.expire_at):
                             buy_users[qq] = info
 
-                with open(buy_info_filepath, encoding="utf-8") as data_file:
+                with open(str(buy_info_filepath), encoding="utf-8") as data_file:
                     raw_infos = json.load(data_file)
                     for qq, raw_info in raw_infos.items():
                         info = BuyInfo().auto_update_config(raw_info)
@@ -1917,13 +1963,15 @@ def show_multiprocessing_info(cfg: Config):
     if cfg.common.enable_multiprocessing:
         msg += f"当前已开启多进程模式，进程池大小为 {cfg.get_pool_size()}"
         if cfg.common.enable_super_fast_mode:
-            msg += ", 超快速模式已开启，将并行运行各个账号的各个活动~"
+            msg += "\n\n超快速模式已开启，将并行运行各个账号的各个活动~"
         else:
-            msg += ", 超快速模式未开启，将并行运行各个账号。如需同时运行各个活动，可开启该模式~"
+            msg += "\n\n超快速模式未开启，将并行运行各个账号。如需同时运行各个活动，可开启该模式~"
+
+        msg += "\n\n如果每次启动时明显卡顿或者会导致电脑死机，请在【配置工具/公共配置/多进程】中调整进程池大小，或者关闭多进程相关模式（仅影响运行速度，不影响运行结果）"
     else:
         msg += "未开启多进程模式，如需开启，可前往配置工具开启"
 
-    logger.info(color("bold_yellow") + msg)
+    async_message_box(msg, "多进程配置提示", show_once=True, color_name="bold_yellow")
 
     # 上报多进程相关功能的使用情况
     increase_counter(ga_category="enable_multiprocessing", name=cfg.common.enable_multiprocessing)
@@ -1976,6 +2024,36 @@ def try_save_configs_to_user_data_dir():
             indent=4,
             ensure_ascii=False,
         )
+
+    # 顺带同时保存多个版本的配置文件，方便找回
+    save_multiple_version_config()
+
+
+def save_multiple_version_config():
+    cwd = os.getcwd()
+    appdata_dir = get_appdata_save_dir()
+
+    config_backup_dir = os.path.join(appdata_dir, "..backups")
+    current_backup_dir = os.path.join(config_backup_dir, format_now("%Y-%m-%d %H_%M_%S"))
+
+    config_file = "config.toml"
+    if os.path.isfile("config.toml.local"):
+        config_file = "config.toml.local"
+
+    source = os.path.join(cwd, config_file)
+    destination = os.path.join(current_backup_dir, config_file)
+
+    logger.info(
+        color("bold_yellow")
+        + f"单独保存多个版本的 {config_file} 到 {config_backup_dir}，可在该目录中找到之前版本的配置文件，方便在意外修改配置且已经同步到备份目录时仍能找回配置"
+    )
+    make_sure_dir_exists(current_backup_dir)
+
+    # 备份配置文件
+    shutil.copy2(source, destination)
+
+    # 为避免备份数据过大，超过一定大小时进行删除
+    clean_dir_to_size(config_backup_dir, max_logs_size=20 * MiB)
 
 
 @try_except()
@@ -2140,6 +2218,7 @@ def demo_pay_info():
     # from config import to_raw_type
     # cfg.common.on_config_update(to_raw_type(cfg.common))
 
+    # from util import reset_cache
     # reset_cache(cache_name_user_buy_info)
 
     logger.info("尝试获取DLC信息")
@@ -2157,6 +2236,15 @@ def demo_pay_info():
     logger.info(color("bold_cyan") + monthly_pay_info)
 
 
+def demo_show_tips():
+    # 读取配置信息
+    load_config("config.toml")
+    cfg = config()
+
+    show_tips(cfg)
+    pause()
+
+
 if __name__ == "__main__":
     freeze_support()
 
@@ -2165,4 +2253,5 @@ if __name__ == "__main__":
 
     # demo_show_notices()
     # demo_show_activities_summary()
-    # show_tips()
+
+    # demo_show_tips()

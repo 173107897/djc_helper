@@ -190,13 +190,13 @@ def main():
     nm = NoticeManager(load_from_remote=False)
 
     # note: 在这里添加公告
-    title = "卡 爱玩 登录流程 v2"
-    message = """v16.1.0版本新增的QQ视频活动所需的腾讯爱玩登录流程，目前【扫码登录】成功后会异常卡住，可暂时先关闭腾讯视频活动。
+    title = "更新周年庆版本小助手提示"
+    message = """当你看到这个公告时，请看看命令行的标题栏里的版本号，确认其版本至少为【v17.3.1 2022.6.17】，如果发现你的版本在这之前，请在点击确认后弹出的网盘页面中手动下载下最新版本的小助手
 
-目前已修复，等晚上更新新版本后再重新开启即可。如果还是不可用，到时候再关掉这个活动就行。
+不然的话，你会发现这几天跑了小助手，游戏里邮箱也没收到啥东西-。-
 """
-    open_url = ""
-    show_only_before_version = ""
+    open_url = "https://fzls.lanzouf.com/s/djc-helper"
+    show_only_before_version = "17.3.1"
 
     if title != "":
         nm.add_notice(

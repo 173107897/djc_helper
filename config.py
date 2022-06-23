@@ -1,3 +1,4 @@
+import datetime
 import json
 import logging
 import os
@@ -12,6 +13,7 @@ import toml
 from const import appVersion, cached_dir
 from dao import DnfHelperChronicleExchangeGiftInfo
 from data_struct import ConfigInterface, to_raw_type
+from first_run import is_first_run_in, is_monthly_first_run
 from log import color, consoleHandler, consoleLogFormatter, logger
 from sign import getACSRFTokenForAMS, getDjcSignParams
 from util import (
@@ -111,12 +113,13 @@ class XinYueAppOperationConfig(ConfigInterface):
         # 操作名称
         self.name = "兑换复活币"
         # 抓包获取的加密http请求体。
-        # 加密http请求体获取方式：抓包获取http body。如fiddler，抓包，找到对应请求（body大小为150的请求），右侧点Inspector/HexView，选中Http Body部分的字节码（未标蓝部分），右击Copy/Copy as 0x##，然后粘贴出来，将其中的bytes复制到下列对应数组位置
+        # 加密http请求体获取方式：抓包获取http body。如fiddler，抓包，找到对应请求（body列为150或149的请求），右侧点Inspector/HexView，选中Http Body部分的字节码（未标蓝部分），右击Copy/Copy as 0x##，然后粘贴出来，将其中的bytes复制到下列对应数组位置
         #      形如 0x58, 0x59, 0x01, 0x00 ...
-        # 也可以使用小黄鸟HttpCanary来抓包，找到对应请求（body大小为150的请求），分享请求内容到电脑，然后下载后拖到HxD（另外下载）中查看，从后往前找，从右侧文本区显示为XY..，左侧十六进制区域为58 59 01 00的那个地方开始选择（也就是58 59为起点），一直选择到末尾，然后复制
+        #
+        # 如果fiddler无法抓取到请求包，也可以使用小黄鸟HttpCanary来抓包，找到对应请求（response的content-length为150或149的请求），分享请求内容到电脑，然后下载后拖到HxD（另外下载）中查看，从后往前找，从右侧文本区显示为XY..，左侧十六进制区域为58 59 01 00的那个地方开始选择（也就是58 59为起点），一直选择到末尾，然后复制
         #      形如 58 59 01 00
-        # 小黄鸟分享的请求文件，也可以使用vscode的hexdump插件来复制相关内容。打开vscode，安装hexdump插件，然后把下载的请求文件拖到vscode中，ctrl+shift+p呼出命令面板，输入hexdump，即可看到十六进制视图。
-        # 跟上面的步骤一样，从58 59 01 00（XY..)那个地方一直选择到最后，然后右键选择  Copy the selection in a specific format，选择 C 的格式，然后把复制出来的内容中 { 到 } 之间的0x58, 0x59, 这些复制到下面的数组区域
+        #   小黄鸟分享的请求文件，也可以使用vscode的hexdump插件来复制相关内容。打开vscode，安装hexdump插件，然后把下载的请求文件拖到vscode中，ctrl+shift+p呼出命令面板，输入hexdump，即可看到十六进制视图。
+        #   跟上面的步骤一样，从58 59 01 00（XY..)那个地方一直选择到最后，然后右键选择  Copy the selection in a specific format，选择 C 的格式，然后把复制出来的内容中 { 到 } 之间的0x58, 0x59, 这些复制到下面的数组区域
         #      形如 0x58, 0x59, 0x01, 0x00, 0x00, 0x01, 0x5d, 0x0a,
         #       0x01, 0x02, 0x97, 0x10, 0x02, 0x3d, 0x00, 0x00,
         # 也就是说，下面两种格式都支持
@@ -643,15 +646,22 @@ class FunctionSwitchesConfig(ConfigInterface):
         # 是否禁用各种活动，供小号使用，这样新增的各种活动都将被禁用
         # 例外情况：道聚城、许愿、心悦特权专区、集卡这四个活动不受该配置项影响
         # 如果想要单独设置各个活动的开关，请不要设置这个配置项，否则各个新活动都会被禁用
-        self.disable_most_activities = False
+        self.disable_most_activities_v2 = False
 
         # 是否禁用分享功能
         self.disable_share = False
 
-        # 是否禁用 QQ空间pskey 活动
-        self.disable_qzone_pskey_activities = False
-        # 是否禁用 安全管家pskey 活动
-        self.disable_guanjia_pskey_activities = False
+        # ------------ 登陆类型开关 ------------
+        # 是否禁用 普通 登录
+        self.disable_login_mode_normal = False
+        # 是否禁用 QQ空间 登录
+        self.disable_login_mode_qzone = False
+        # 是否禁用 爱玩 登录
+        self.disable_login_mode_iwan = False
+        # 是否禁用 安全管家 登录
+        self.disable_login_mode_guanjia = False
+        # 是否禁用 心悦 登录
+        self.disable_login_mode_xinyue = False
 
         # ------------ 普通skey（需要登录 炎炎夏日 活动页面 获取） ------------
         # 是否领取道聚城
@@ -746,6 +756,8 @@ class FunctionSwitchesConfig(ConfigInterface):
         self.get_dnf_anniversary = True
         # 是否领取 KOL 活动
         self.get_dnf_kol = True
+        # 是否领取 冒险的起点 活动
+        self.get_maoxian_start = True
         # 是否领取 勇士的冒险补给 活动
         self.get_maoxian = True
         # 是否领取 小酱油周礼包和生日礼包 活动
@@ -770,10 +782,16 @@ class FunctionSwitchesConfig(ConfigInterface):
         self.get_dnf_memory = True
         # 是否领取 DNF娱乐赛 活动
         self.get_dnf_game = True
+        # 是否领取 DNF互动站 活动
+        self.get_dnf_interactive = True
         # 是否领取 魔界人探险记 活动
         self.get_mojieren = True
+        # 是否领取 我的小屋 活动
+        self.get_dnf_my_home = True
         # 是否领取 组队拜年 活动
         self.get_team_happy_new_year = True
+        # 是否领取 翻牌 活动
+        self.get_dnf_card_flip = True
 
         # ------------ QQ空间pskey（需要登录 QQ空间 获取） ------------
         # 是否启用 集卡 功能
@@ -814,7 +832,7 @@ class AccountConfig(ConfigInterface):
         # auto_login：   自动登录，每次运行若本地缓存的.skey文件中存储的skey过期了，根据填写的账密信息，自动登录来获取uin和skey，无需手动操作
         self.login_mode = self.login_mode_qr_login
         # 是否无法在道聚城绑定dnf，比如被封禁或者是朋友的QQ（主要用于小号，被风控不能注册dnf账号，但是不影响用来当抽卡等活动的工具人）
-        self.cannot_bind_dnf = False
+        self.cannot_bind_dnf_v2 = False
         # 漂流瓶每日邀请列表，最多可填8个（不会实际发消息）
         self.drift_send_qq_list: List[str] = []
         # dnf13周年邀请列表，最多可填3个（不会实际发消息）
@@ -834,8 +852,6 @@ class AccountConfig(ConfigInterface):
         self.gonghui_rolename_huizhang = ""
         # 公会活动-会员角色名称，如果不设置，则尝试符合条件的角色（优先当前角色）
         self.gonghui_rolename_huiyuan = ""
-        # dnf论坛签到formhash
-        self.dnf_bbs_formhash = ""
         # dnf论坛cookie
         self.dnf_bbs_cookie = ""
         # colg cookie
@@ -917,6 +933,25 @@ class AccountConfig(ConfigInterface):
 
         if not self.check_role_id("关怀活动", self.vip_mentor.guanhuai_dnf_role_id):
             self.vip_mentor.guanhuai_dnf_role_id = ""
+
+        if self.cannot_bind_dnf_v2 and not self.function_switches.disable_most_activities_v2:
+            if is_monthly_first_run(f"每月提示绑定dnf与活动开关不匹配-{self.name}"):
+                async_message_box(
+                    (
+                        f"{self.name} 当前设置了【无法在道聚城绑定dnf】，但却没有设置【禁用绝大多数活动】，会导致部分新活动无法自动绑定，每次都提示手动绑定。\n"
+                        "\n"
+                        "请确定你想要的下面哪种情况:\n"
+                        "\n"
+                        "1. 这个号需要领取奖励\n"
+                        "    请前往配置工具将【道聚城/无法在道聚城绑定dnf】与【活动开关/禁用绝大多数活动】这两个开关 取消勾选\n"
+                        "\n"
+                        "2. 这个号不需要领取奖励，纯粹是QQ空间集卡活动的工具人\n"
+                        "    请前往配置工具将【活动开关/禁用绝大多数活动】勾选上，确保不会执行各种需要角色信息才能运行的活动，避免一直弹窗提示【需要去活动页面绑定角色】\n"
+                        "\n"
+                        "如果仍保持当前配置，也就是设置了前者，未设置后者，那么每个月会弹出一次本弹窗~\n"
+                    ),
+                    "禁用活动开关已开启提示",
+                )
 
     def check_role_id(self, ctx, role_id) -> bool:
         if len(role_id) != 0 and not role_id.isdigit():
@@ -1011,6 +1046,12 @@ class LoginConfig(ConfigInterface):
 
         # 推荐登录重试间隔变化率r。新的推荐值 = (1-r)*旧的推荐值 + r*本次成功重试的间隔
         self.recommended_retry_wait_time_change_rate = 0.125
+
+        # 点击头像登录
+        # 账号密码登录 是否尝试 自动点击头像登录
+        self.enable_auto_click_avatar_in_auto_login = True
+        # 扫码登录 是否尝试 自动点击头像登录
+        self.enable_auto_click_avatar_in_qr_login = True
 
 
 class RetryConfig(ConfigInterface):
@@ -1114,6 +1155,8 @@ class CommonConfig(ConfigInterface):
         self.enable_super_fast_mode = True
         # 进程池大小，若为0，则默认为当前cpu核心数，若为-1，则在未开启超快速模式时为当前账号数，开启时为4*当前cpu核心数
         self.multiprocessing_pool_size = -1
+        # 是否启用多进程登录功能，如果分不清哪个号在登录，请关闭该选项
+        self.enable_multiprocessing_login = True
         # 是否强制使用打包附带的便携版chrome
         self.force_use_portable_chrome = False
         # 强制使用特定大版本的chrome，默认为0，表示使用小助手默认设定的版本。
@@ -1128,7 +1171,7 @@ class CommonConfig(ConfigInterface):
         self.log_level = "info"
         # 日志目录最大允许大小（单位为MiB），当超出该大小时将进行清理
         self.max_logs_size = 1024
-        # 日志目录保留大小（单位为Mib），每次清理时将按时间顺序清理日志，直至剩余日志大小不超过该值
+        # 日志目录保留大小（单位为MiB），每次清理时将按时间顺序清理日志，直至剩余日志大小不超过该值
         self.keep_logs_size = 512
         # 是否在程序启动时手动检查更新
         self.check_update_on_start = True
@@ -1137,18 +1180,20 @@ class CommonConfig(ConfigInterface):
         self.readme_page = "https://github.com/fzls/djc_helper/blob/master/README.MD"
         self.changelog_page = "https://github.com/fzls/djc_helper/blob/master/CHANGELOG.MD"
         self.github_mirror_sites = [
-            "github.com.cnpmjs.org",
-            "hub.fastgit.org",
-            "gitclone.com/github.com",
+            "api.mtr.pub",
+            "gh.gcdn.mirr.one",
+            "hub.0z.gs",
+            "hub.fastgit.xyz",
         ]
         # 自动更新dlc购买地址
-        self.auto_updater_dlc_purchase_url = "https://www.kuaifaka.net/purchasing?link=auto-updater"
+        self.auto_updater_dlc_purchase_url = "https://www.kami.vip/purchasing?link=auto-updater"
         # 按月付费购买地址
-        self.pay_by_month_purchase_url = "https://www.kuaifaka.net/purchasing?link=pay-by-month"
+        self.pay_by_month_purchase_url = "https://www.kami.vip/purchasing?link=pay-by-month"
         # 网盘地址
-        self.netdisk_link = "https://fzls.lanzouo.com/s/djc-helper"
+        self.netdisk_link = "https://fzls.lanzoum.com/s/djc-helper"
+        self.netdisk_link_for_report = self.netdisk_link
         # QQ群
-        self.qq_group = 517463079
+        self.qq_group = 791343073
         # 是否启用自动更新功能
         self.auto_update_on_start = True
         # 是否仅允许单个运行实例
@@ -1162,6 +1207,8 @@ class CommonConfig(ConfigInterface):
         self.notify_pay_expired_in_days = 7
         # 马杰洛新春版本赠送卡片目标QQ
         self.majieluo_send_card_target_qq = ""
+        # 心悦集卡赠送卡片目标QQ
+        self.xinyue_send_card_target_qq = ""
         # 抽卡汇总展示色彩
         self.ark_lottery_summary_show_color = ""
         # 是否在活动最后一天消耗所有卡牌来抽奖（若还有卡）
@@ -1225,12 +1272,17 @@ class CommonConfig(ConfigInterface):
             try:
                 with open(url_config_filepath, encoding="utf-8-sig") as url_config_file:
                     url_config = toml.load(url_config_file)
+                    if "auto_updater_dlc_purchase_url" in url_config:
+                        self.auto_updater_dlc_purchase_url = url_config["auto_updater_dlc_purchase_url"]
                     if "pay_by_month_purchase_url" in url_config:
                         self.pay_by_month_purchase_url = url_config["pay_by_month_purchase_url"]
                     if "netdisk_link" in url_config:
                         self.netdisk_link = url_config["netdisk_link"]
             except Exception:
                 pass
+
+        # 备份一份原始配置链接，方便统计来源
+        self.netdisk_link_for_report = self.netdisk_link
 
         # 替换网盘链接中的域名为蓝奏云api中最新的域名
         from lanzou.api import LanZouCloud
@@ -1477,8 +1529,8 @@ def gen_config_for_github_action():
         account_cfg.function_switches.get_guanjia = False
 
         # qq空间和管家全局开关
-        account_cfg.function_switches.disable_qzone_pskey_activities = True
-        account_cfg.function_switches.disable_guanjia_pskey_activities = True
+        account_cfg.function_switches.disable_login_mode_qzone = True
+        account_cfg.function_switches.disable_login_mode_guanjia = True
 
     # 保存到专门配置文件
     show_config_size(cfg, "精简前")
